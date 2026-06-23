@@ -12,6 +12,7 @@ from src.services.diarizer import SpeakerDiarizer
 from src.services.transcriber import WhisperTranscriber
 from src.services.summarizer import AISummarizer
 from src.utils.formatter import TranscriptFormatter
+from src.utils.analyzer import analyze_sentiment, extract_flagged_phrases
 
 
 class AudioTranscriptionPipeline:
@@ -106,14 +107,14 @@ class AudioTranscriptionPipeline:
 
             # Step 5
             summary = None
+            transcript_text = TranscriptFormatter.format_segments_to_text(
+                merged_segments,
+                include_timestamps=False
+            )
             if include_summary and self.summarizer and self.summarizer.is_available():
                 print("\n[5/5] Generating AI summary", flush=True)
                 step_start = time.time()
                 statistics = TranscriptFormatter.calculate_statistics(merged_segments)
-                transcript_text = TranscriptFormatter.format_segments_to_text(
-                    merged_segments,
-                    include_timestamps=False
-                )
                 summary = self.summarizer.create_summary(
                     transcript_text,
                     statistics,
@@ -124,6 +125,10 @@ class AudioTranscriptionPipeline:
             else:
                 print("\n[5/5] Skipping AI summary", flush=True)
                 timings['summarization'] = 0
+
+            # Sentiment & flagged phrases analysis
+            sentiment = analyze_sentiment(summary or '')
+            flagged_phrases = extract_flagged_phrases(merged_segments)
 
             statistics = TranscriptFormatter.calculate_statistics(merged_segments)
             timings['total'] = time.time() - total_start
@@ -140,6 +145,8 @@ class AudioTranscriptionPipeline:
                 'segments': merged_segments,
                 'statistics': statistics,
                 'summary': summary,
+                'sentiment': sentiment,
+                'flagged_phrases': flagged_phrases,
                 'timings': timings
             }
 

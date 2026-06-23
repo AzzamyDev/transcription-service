@@ -187,6 +187,18 @@ def swagger_spec():
                                                         "type": "string",
                                                         "example": "Brief conversation summary..."
                                                     },
+                                                    "sentiment": {
+                                                        "type": "string",
+                                                        "enum": ["POSITIVE", "NEGATIVE", "NEUTRAL"],
+                                                        "example": "NEUTRAL",
+                                                        "description": "Sentiment dari summary: POSITIVE | NEGATIVE | NEUTRAL"
+                                                    },
+                                                    "flagged_phrases": {
+                                                        "type": "array",
+                                                        "items": {"type": "string"},
+                                                        "example": ["SPEAKER_1: transfer rekening ke nomor ini"],
+                                                        "description": "Frasa mencurigakan dari transcript (maks 10, prioritas keyword TINGGI)"
+                                                    },
                                                     "timings": {
                                                         "type": "object",
                                                         "properties": {
@@ -356,6 +368,8 @@ def transcribe():
         response_data = {
             'transcript': formatted_transcript,
             'summary': result['summary'],
+            'sentiment': result['sentiment'],
+            'flagged_phrases': result['flagged_phrases'],
             'audio_info': {
                 'duration_seconds': result['audio_info']['duration_seconds'],
                 'duration_minutes': result['audio_info']['duration_minutes'],
