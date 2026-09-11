@@ -1,7 +1,8 @@
 """Gunicorn Config - 1 Worker with Real-time Progress"""
 bind = "0.0.0.0:8000"
 workers = 1
-worker_class = "sync"
+worker_class = "gthread"
+threads = 2
 worker_tmp_dir = "/dev/shm"
 timeout = 900
 max_requests = 100

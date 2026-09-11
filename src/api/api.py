@@ -237,6 +237,12 @@ def swagger_spec():
     return jsonify(spec)
 
 
+@app.route('/ping', methods=['GET'])
+def ping():
+    """Lightweight liveness probe — never blocked by inference"""
+    return jsonify({'status': 'ok'}), 200
+
+
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint"""
