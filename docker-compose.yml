@@ -15,8 +15,6 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    runtime: nvidia
-
     # Expose port 8000 directly
     ports:
       - "8000:8000"
