@@ -3,6 +3,7 @@ AI Summarization - Ollama (Self-hosted, Gratis)
 Model: qwen2.5:14b — terbaik untuk Bahasa Indonesia
 """
 from typing import Optional, Dict
+import time
 import requests
 import json
 
@@ -14,6 +15,10 @@ from src.core.exceptions import SummarizationError
 OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_MODEL = "qwen2.5:14b"
 
+# Re-check Ollama availability every 5 minutes so a temporary outage
+# at worker startup doesn't permanently disable summarization.
+_AVAILABILITY_TTL = 300
+
 
 class AISummarizer:
     """Generate summaries via Ollama - self-hosted, gratis"""
@@ -21,11 +26,13 @@ class AISummarizer:
     def __init__(self, base_url: Optional[str] = None, model: Optional[str] = None):
         self.base_url = base_url or Config.OLLAMA_BASE_URL if hasattr(Config, 'OLLAMA_BASE_URL') else OLLAMA_BASE_URL
         self.model = model or Config.OLLAMA_MODEL if hasattr(Config, 'OLLAMA_MODEL') else OLLAMA_MODEL
-        self._available = None  # lazy check
+        self._available: Optional[bool] = None
+        self._available_checked_at: float = 0
 
     def is_available(self) -> bool:
-        """Cek apakah Ollama bisa diakses dan model tersedia"""
-        if self._available is not None:
+        """Cek apakah Ollama bisa diakses dan model tersedia (re-check tiap 5 menit)"""
+        now = time.time()
+        if self._available is not None and (now - self._available_checked_at) < _AVAILABILITY_TTL:
             return self._available
 
         try:
@@ -43,6 +50,7 @@ class AISummarizer:
             print(f"[Summarizer] Ollama tidak bisa diakses di {self.base_url}: {e}", flush=True)
             self._available = False
 
+        self._available_checked_at = now
         return self._available
 
     def _generate(self, prompt: str, max_tokens: int = 800) -> str:
