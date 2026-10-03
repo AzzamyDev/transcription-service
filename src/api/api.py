@@ -9,6 +9,7 @@ import os
 import time
 from pathlib import Path
 from io import BytesIO
+import threading
 
 from src.core.config import Config
 from src.core.exceptions import *
@@ -45,6 +46,8 @@ app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL)
 # DO NOT create pipeline here - it will be set externally
 pipeline = None
 jobs = None
+# Leaves request threads free for /ping, /health and /jobs.
+sync_waiters = threading.BoundedSemaphore(Config.SYNC_MAX_WAITERS)
 
 
 def init(loaded_pipeline):
@@ -53,8 +56,8 @@ def init(loaded_pipeline):
     pipeline = loaded_pipeline
     jobs = JobQueue(
         _run_job,
-        concurrency=Config.ASR_CONCURRENCY,
         max_pending=Config.ASR_MAX_PENDING,
+        job_timeout_seconds=Config.ASR_JOB_TIMEOUT_MINUTES * 60,
     )
 
 
@@ -461,7 +464,15 @@ def transcribe():
     audio = file.read()
     if len(audio) == 0:
         return _error('Empty file', 400)
+    if not sync_waiters.acquire(blocking=False):
+        return _error('Too many waiting requests; use POST /jobs', 503)
+    try:
+        return _transcribe_and_wait(audio, request_start)
+    finally:
+        sync_waiters.release()
 
+
+def _transcribe_and_wait(audio, request_start):
     try:
         job = jobs.submit({
             'kind': 'mixed',
@@ -474,7 +485,10 @@ def transcribe():
     except QueueFullError as e:
         return _error(f'Queue full: {e}', 503)
 
+    deadline = time.time() + Config.SYNC_MAX_WAIT_SECONDS
     while job.status in ('queued', 'processing'):
+        if time.time() > deadline:
+            return _error(f'Still processing; poll GET /jobs/{job.id}', 504)
         time.sleep(1)
     if job.status == 'failed':
         return _error(f'Transcription failed: {job.error}', 500)

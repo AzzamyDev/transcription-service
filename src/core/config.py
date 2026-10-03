@@ -43,9 +43,13 @@ class Config:
     NO_SPEECH_THRESHOLD = 0.6
     LOGPROB_THRESHOLD = -1.0
 
-    # Background jobs
-    ASR_CONCURRENCY = int(os.getenv('ASR_CONCURRENCY', '1'))
-    ASR_MAX_PENDING = int(os.getenv('ASR_MAX_PENDING', '200'))
+    # Background jobs. Queued jobs hold their audio in memory.
+    ASR_MAX_PENDING = int(os.getenv('ASR_MAX_PENDING', '30'))
+    # A job running longer than this is taken as hung: the service restarts.
+    ASR_JOB_TIMEOUT_MINUTES = int(os.getenv('ASR_JOB_TIMEOUT_MINUTES', '60'))
+    # Legacy /transcribe callers each hold a request thread while they wait.
+    SYNC_MAX_WAITERS = 4
+    SYNC_MAX_WAIT_SECONDS = int(os.getenv('SYNC_MAX_WAIT_SECONDS', '1800'))
 
     @classmethod
     def validate(cls) -> tuple[bool, list[str]]:

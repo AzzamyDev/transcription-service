@@ -1,7 +1,9 @@
 """
 Background transcription jobs: requests are accepted at once and processed
-by worker threads, so no HTTP request ever waits on the GPU.
+by one worker thread, so no HTTP request ever waits on the GPU. The models
+are not thread-safe, hence exactly one worker.
 """
+import os
 import queue
 import threading
 import time
@@ -32,21 +34,22 @@ class JobQueue:
     def __init__(
         self,
         handler: Callable[[Any], dict],
-        concurrency: int = 1,
-        max_pending: int = 200,
+        max_pending: int = 30,
         retention_seconds: int = 24 * 3600,
+        job_timeout_seconds: int = 3600,
+        on_stuck: Callable[[Job], None] = None,
     ):
         self._handler = handler
         self._max_pending = max_pending
         self._retention_seconds = retention_seconds
+        self._job_timeout_seconds = job_timeout_seconds
+        self._on_stuck = on_stuck or _restart
         self._jobs: Dict[str, Job] = {}
         self._by_key: Dict[str, str] = {}
         self._pending: 'queue.Queue[str]' = queue.Queue()
         self._lock = threading.Lock()
-        for i in range(max(1, concurrency)):
-            threading.Thread(
-                target=self._work, name=f'asr-worker-{i}', daemon=True
-            ).start()
+        threading.Thread(target=self._work, name='asr-worker', daemon=True).start()
+        threading.Thread(target=self._watch, name='asr-watchdog', daemon=True).start()
 
     def submit(self, payload: Any, key: Optional[str] = None) -> Job:
         """Queue a job; a key already queued, running or done returns that job."""
@@ -109,6 +112,23 @@ class JobQueue:
                 job.finished_at = time.time()
                 # The audio is no longer needed once processed.
                 job.payload = None
+                with self._lock:
+                    self._prune()
+
+    def _watch(self):
+        """A GPU call that never returns would block the queue for good; a
+        restart reloads the models and clients resend the jobs it lost."""
+        while True:
+            time.sleep(min(30, self._job_timeout_seconds))
+            with self._lock:
+                stuck = [
+                    job for job in self._jobs.values()
+                    if job.status == 'processing'
+                    and job.started_at
+                    and time.time() - job.started_at > self._job_timeout_seconds
+                ]
+            for job in stuck:
+                self._on_stuck(job)
 
     def _prune(self):
         cutoff = time.time() - self._retention_seconds
@@ -117,3 +137,11 @@ class JobQueue:
                 del self._jobs[job_id]
                 if job.key and self._by_key.get(job.key) == job_id:
                     del self._by_key[job.key]
+
+
+def _restart(job: Job):
+    print(
+        f"Job {job.id} has run over its time limit; restarting the service",
+        flush=True,
+    )
+    os._exit(1)

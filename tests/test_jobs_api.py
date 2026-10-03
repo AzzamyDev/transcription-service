@@ -131,3 +131,43 @@ def test_legacy_transcribe_still_answers_synchronously(client):
     assert body['success'] is True
     assert 'segments' not in body['data']
     assert body['data']['transcript'] == 'SPEAKER_00: halo'
+
+
+def test_watchdog_reports_a_job_stuck_past_its_limit():
+    from src.services.jobs import JobQueue
+
+    stuck = []
+    hang = threading.Event()
+    jobs = JobQueue(lambda payload: hang.wait(5), job_timeout_seconds=1, on_stuck=stuck.append)
+    job = jobs.submit({'audio': b'x'})
+    deadline = time.time() + 5
+    while not stuck and time.time() < deadline:
+        time.sleep(0.1)
+    hang.set()
+    assert stuck and stuck[0].id == job.id
+
+
+def test_full_queue_is_refused_not_buffered():
+    from src.services.jobs import JobQueue, QueueFullError
+
+    block = threading.Event()
+    jobs = JobQueue(lambda payload: block.wait(5), max_pending=1)
+    jobs.submit({'n': 1})  # taken by the worker
+    time.sleep(0.2)
+    jobs.submit({'n': 2})  # waits
+    with pytest.raises(QueueFullError):
+        jobs.submit({'n': 3})
+    block.set()
+
+
+def test_legacy_transcribe_refuses_when_too_many_callers_wait(client):
+    taken = [api.sync_waiters.acquire(blocking=False) for _ in range(4)]
+    try:
+        res = client.post('/transcribe', data={'file': (io.BytesIO(b'x'), 'c.mp3')},
+                          content_type='multipart/form-data')
+        assert res.status_code == 503
+        assert client.get('/ping').status_code == 200
+    finally:
+        for ok in taken:
+            if ok:
+                api.sync_waiters.release()

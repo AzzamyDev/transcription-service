@@ -226,7 +226,9 @@ GET /formats
 
 `POST /transcribe` answers only when the transcription is done, which takes
 minutes for long calls. `POST /jobs` answers at once with `202` and a job id;
-one worker thread per `ASR_CONCURRENCY` (default 1) runs the GPU work.
+one worker thread runs the GPU work, one job at a time (the models are not
+thread-safe). A job running longer than `ASR_JOB_TIMEOUT_MINUTES` (default
+60) is taken as hung and the worker restarts; clients resend lost jobs.
 
 **Per-speaker tracks** (no diarization; the speaker is known):
 
@@ -254,7 +256,9 @@ curl http://localhost:8000/jobs/<job_id>
 ```
 
 Finished jobs are kept for 24 hours; a restart drops them, so clients should
-resubmit a job that answers 404. `ASR_MAX_PENDING` (default 200) caps the queue.
+resubmit a job that answers 404. `ASR_MAX_PENDING` (default 30) caps the queue,
+whose jobs hold their audio in memory. `POST /transcribe` serves at most 4
+waiting callers (503 beyond) for up to `SYNC_MAX_WAIT_SECONDS` (504 after).
 
 Tests (no GPU needed): `pip install pytest flask flask-cors flask-swagger-ui python-dotenv numpy && python -m pytest tests`
 
