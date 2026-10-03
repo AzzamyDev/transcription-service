@@ -114,6 +114,47 @@ class WhisperTranscriber:
         except Exception as e:
             raise TranscriptionError(f"Transcription with speakers failed: {str(e)}")
 
+    def transcribe_speech(
+        self,
+        samples: np.ndarray,
+        sample_rate: int,
+        language: Optional[str] = None
+    ) -> List[Dict[str, any]]:
+        """
+        Transcribe one speaker's own track. Whisper tends to invent text over
+        silence, which a per-speaker track has plenty of, so segments that are
+        quiet or that Whisper itself rates as non-speech are dropped.
+        """
+        try:
+            result = self.transcribe_tensor(
+                torch.from_numpy(samples), sample_rate, language
+            )
+            segments = []
+            for seg in result['segments']:
+                text = seg['text'].strip()
+                if not text:
+                    continue
+                window = samples[int(seg['start'] * sample_rate):int(seg['end'] * sample_rate)]
+                if window.size == 0:
+                    continue
+                level_db = 20 * np.log10(np.sqrt(np.mean(window ** 2)) + 1e-10)
+                if level_db < Config.SILENCE_DB:
+                    continue
+                if (
+                    seg.get('no_speech_prob', 0) > Config.NO_SPEECH_THRESHOLD
+                    and seg.get('avg_logprob', 0) < Config.LOGPROB_THRESHOLD
+                ):
+                    continue
+                segments.append({
+                    'start': float(seg['start']),
+                    'end': float(seg['end']),
+                    'text': text,
+                })
+            return segments
+
+        except Exception as e:
+            raise TranscriptionError(f"Track transcription failed: {str(e)}")
+
     @staticmethod
     def _align_segments(
         whisper_segments: List[Dict],

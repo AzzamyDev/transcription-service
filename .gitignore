@@ -59,4 +59,4 @@ temp/
 ~/.cache/torch/
 
 # OS
-Thumbs.db
+Thumbs.db.pytest_cache/

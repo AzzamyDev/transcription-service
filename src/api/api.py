@@ -6,13 +6,13 @@ from flask import Flask, request, jsonify
 from flask_swagger_ui import get_swaggerui_blueprint
 from flask_cors import CORS
 import os
-import traceback
 import time
 from pathlib import Path
 from io import BytesIO
 
 from src.core.config import Config
 from src.core.exceptions import *
+from src.services.jobs import JobQueue, QueueFullError
 
 
 # Initialize Flask app
@@ -44,6 +44,106 @@ app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL)
 # Pipeline will be injected by wsgi.py (production) or initialized by run.py (dev)
 # DO NOT create pipeline here - it will be set externally
 pipeline = None
+jobs = None
+
+
+def init(loaded_pipeline):
+    """Attach the loaded pipeline and start the job workers"""
+    global pipeline, jobs
+    pipeline = loaded_pipeline
+    jobs = JobQueue(
+        _run_job,
+        concurrency=Config.ASR_CONCURRENCY,
+        max_pending=Config.ASR_MAX_PENDING,
+    )
+
+
+def _run_job(payload):
+    """Runs on a job worker thread: the only place the GPU is used"""
+    pipe = get_pipeline()
+    if payload['kind'] == 'tracks':
+        result = pipe.process_tracks(
+            payload['tracks'], include_summary=payload['include_summary']
+        )
+    else:
+        result = pipe.process(
+            BytesIO(payload['audio']),
+            num_speakers=payload['num_speakers'],
+            min_speakers=payload['min_speakers'],
+            max_speakers=payload['max_speakers'],
+            include_summary=payload['include_summary'],
+        )
+    return _format_result(result)
+
+
+def _format_result(result):
+    """The response data shared by /transcribe and finished jobs"""
+    format_start = time.time()
+    transcript_lines = []
+    current_speaker = None
+    for seg in result['segments']:
+        if seg['speaker'] == current_speaker and transcript_lines:
+            transcript_lines[-1] += f" {seg['text']}"
+        else:
+            transcript_lines.append(f"{seg['speaker']}: {seg['text']}")
+            current_speaker = seg['speaker']
+
+    return {
+        'transcript': "\n".join(transcript_lines),
+        'summary': result['summary'],
+        'sentiment': result['sentiment'],
+        'flagged_phrases': result['flagged_phrases'],
+        'segments': result['segments'],
+        'audio_info': {
+            'duration_seconds': result['audio_info']['duration_seconds'],
+            'duration_minutes': result['audio_info']['duration_minutes'],
+            'sample_rate': result['audio_info']['sample_rate']
+        },
+        'statistics': {
+            'total_duration': result['statistics']['total_duration'],
+            'total_words': result['statistics']['total_words'],
+            'num_speakers': result['statistics']['num_speakers'],
+            'speakers': {
+                speaker: {
+                    'duration': round(data['duration'], 2),
+                    'duration_minutes': round(data['duration'] / 60, 2),
+                    'words': data['words'],
+                    'turns': data['turns']
+                }
+                for speaker, data in result['statistics']['speakers'].items()
+            }
+        },
+        'timings': {
+            'validation': round(result['timings'].get('validation', 0), 2),
+            'preparation': round(result['timings'].get('preparation', 0), 2),
+            'diarization': round(result['timings'].get('diarization', 0), 2),
+            'transcription': round(result['timings'].get('transcription', 0), 2),
+            'summarization': round(result['timings'].get('summarization', 0), 2),
+            'formatting': round(time.time() - format_start, 2),
+            'processing_total': round(result['timings'].get('total', 0), 2),
+        }
+    }
+
+
+def _job_view(job):
+    view = {
+        'job_id': job.id,
+        'job_key': job.key,
+        'status': job.status,
+        'position': jobs.position(job),
+        'created_at': job.created_at,
+        'started_at': job.started_at,
+        'finished_at': job.finished_at,
+    }
+    if job.status == 'done':
+        view['result'] = job.result
+    if job.status == 'failed':
+        view['error'] = job.error
+    return view
+
+
+def _error(message, status):
+    return jsonify({'success': False, 'message': message, 'data': None}), status
 
 
 def get_pipeline():
@@ -263,7 +363,8 @@ def health():
                 'whisper': 'loaded',
                 'diarizer': 'loaded',
                 'gpu': 'available' if torch.cuda.is_available() else 'unavailable'
-            }
+            },
+            'jobs': jobs.stats() if jobs else None
         }
 
         return jsonify(health_data), 200
@@ -278,191 +379,115 @@ def health():
         }), 500
 
 
+@app.route('/jobs', methods=['POST'])
+def create_job():
+    """
+    Queue a transcription and answer at once (202). Either several
+    `tracks` (one per speaker) with matching `labels`, `names` and `offsets`
+    (seconds from the call start), or one mixed `file` that is diarized.
+    `job_key` makes a resend return the job already queued for it.
+    """
+    include_summary = request.form.get('include_summary', 'true').lower() == 'true'
+    key = request.form.get('job_key') or None
+    tracks = request.files.getlist('tracks')
+
+    if tracks:
+        labels = request.form.getlist('labels')
+        names = request.form.getlist('names')
+        offsets = request.form.getlist('offsets', type=float)
+        if len(labels) != len(tracks) or len(offsets) != len(tracks):
+            return _error('Every track needs a label and an offset', 400)
+        if names and len(names) != len(tracks):
+            return _error('Names must match the tracks', 400)
+        if any(not label for label in labels) or any(o < 0 for o in offsets):
+            return _error('Labels must be set and offsets not negative', 400)
+        audios = [track.read() for track in tracks]
+        if any(len(audio) == 0 for audio in audios):
+            return _error('Empty track', 400)
+        payload = {
+            'kind': 'tracks',
+            'include_summary': include_summary,
+            'tracks': [
+                {
+                    'label': labels[i],
+                    'name': names[i] if names else labels[i],
+                    'offset': offsets[i],
+                    'audio': audios[i],
+                }
+                for i in range(len(tracks))
+            ],
+        }
+    else:
+        file = request.files.get('file')
+        if file is None or file.filename == '':
+            return _error('No file provided', 400)
+        audio = file.read()
+        if len(audio) == 0:
+            return _error('Empty file', 400)
+        payload = {
+            'kind': 'mixed',
+            'include_summary': include_summary,
+            'audio': audio,
+            'num_speakers': request.form.get('num_speakers', type=int),
+            'min_speakers': request.form.get('min_speakers', type=int),
+            'max_speakers': request.form.get('max_speakers', type=int),
+        }
+
+    try:
+        job = jobs.submit(payload, key)
+    except QueueFullError as e:
+        return _error(f'Queue full: {e}', 503)
+    return jsonify({'success': True, 'message': 'Queued', 'data': _job_view(job)}), 202
+
+
+@app.route('/jobs/<job_id>', methods=['GET'])
+def get_job(job_id):
+    job = jobs.get(job_id)
+    if job is None:
+        return _error('Job not found', 404)
+    return jsonify({'success': True, 'message': job.status, 'data': _job_view(job)}), 200
+
+
 @app.route('/transcribe', methods=['POST'])
 def transcribe():
     """
-    Transcribe audio with speaker diarization and AI summary
-    Pure in-memory processing with detailed timing info
+    Synchronous transcription, kept for older clients. It goes through the
+    job queue too, so the GPU still runs one job at a time.
     """
     request_start = time.time()
+    file = request.files.get('file')
+    if file is None or file.filename == '':
+        return _error('No file provided', 400)
+    audio = file.read()
+    if len(audio) == 0:
+        return _error('Empty file', 400)
 
     try:
-        # Track upload time
-        upload_start = time.time()
+        job = jobs.submit({
+            'kind': 'mixed',
+            'include_summary': request.form.get('include_summary', 'true').lower() == 'true',
+            'audio': audio,
+            'num_speakers': request.form.get('num_speakers', type=int),
+            'min_speakers': None,
+            'max_speakers': None,
+        })
+    except QueueFullError as e:
+        return _error(f'Queue full: {e}', 503)
 
-        # Get file from request
-        if 'file' not in request.files:
-            return jsonify({
-                'success': False,
-                'message': 'No file provided',
-                'data': None
-            }), 400
+    while job.status in ('queued', 'processing'):
+        time.sleep(1)
+    if job.status == 'failed':
+        return _error(f'Transcription failed: {job.error}', 500)
 
-        file = request.files['file']
-
-        if file.filename == '':
-            return jsonify({
-                'success': False,
-                'message': 'No file selected',
-                'data': None
-            }), 400
-
-        # Get parameters
-        num_speakers = request.form.get('num_speakers', type=int)
-        include_summary = request.form.get('include_summary', 'true').lower() == 'true'
-        detailed_segments = request.form.get('detailed_segments', 'false').lower() == 'true'
-
-        # Read file into memory
-        file_content = file.read()
-        upload_time = time.time() - upload_start
-
-        # Validate file not empty
-        if len(file_content) == 0:
-            return jsonify({
-                'success': False,
-                'message': 'Empty file',
-                'data': None
-            }), 400
-
-        # Validate file size
-        file_size_mb = len(file_content) / (1024 * 1024)
-        if file_size_mb > Config.MAX_AUDIO_SIZE_MB:
-            return jsonify({
-                'success': False,
-                'message': f'File too large: {file_size_mb:.1f}MB. Maximum: {Config.MAX_AUDIO_SIZE_MB}MB',
-                'data': None
-            }), 413
-
-        # Get preloaded pipeline (NO LOADING HERE!)
-        pipe = get_pipeline()
-
-        # Process audio - PURE IN-MEMORY (NO FILE SAVING)
-        audio_stream = BytesIO(file_content)
-
-        result = pipe.process(
-            audio_stream,
-            num_speakers=num_speakers,
-            include_summary=include_summary
-        )
-
-        # Track formatting time
-        format_start = time.time()
-
-        # Format transcript for display
-        transcript_lines = []
-        current_speaker = None
-
-        for seg in result['segments']:
-            speaker = seg['speaker']
-            text = seg['text']
-
-            # Merge if same speaker
-            if speaker == current_speaker and transcript_lines:
-                transcript_lines[-1] += f" {text}"
-            else:
-                transcript_lines.append(f"{speaker}: {text}")
-                current_speaker = speaker
-
-        formatted_transcript = "\n".join(transcript_lines)
-
-        format_time = time.time() - format_start
-
-        # Calculate total request time
-        total_request_time = time.time() - request_start
-
-        # Prepare response data
-        response_data = {
-            'transcript': formatted_transcript,
-            'summary': result['summary'],
-            'sentiment': result['sentiment'],
-            'flagged_phrases': result['flagged_phrases'],
-            'audio_info': {
-                'duration_seconds': result['audio_info']['duration_seconds'],
-                'duration_minutes': result['audio_info']['duration_minutes'],
-                'sample_rate': result['audio_info']['sample_rate']
-            },
-            'statistics': {
-                'total_duration': result['statistics']['total_duration'],
-                'total_words': result['statistics']['total_words'],
-                'num_speakers': result['statistics']['num_speakers'],
-                'speakers': {
-                    speaker: {
-                        'duration': round(data['duration'], 2),
-                        'duration_minutes': round(data['duration'] / 60, 2),
-                        'words': data['words'],
-                        'turns': data['turns']
-                    }
-                    for speaker, data in result['statistics']['speakers'].items()
-                }
-            },
-            'timings': {
-                'upload': round(upload_time, 2),
-                'validation': round(result['timings']['validation'], 2),
-                'preparation': round(result['timings']['preparation'], 2),
-                'diarization': round(result['timings']['diarization'], 2),
-                'transcription': round(result['timings']['transcription'], 2),
-                'summarization': round(result['timings']['summarization'], 2),
-                'formatting': round(format_time, 2),
-                'processing_total': round(result['timings']['total'], 2),
-                'request_total': round(total_request_time, 2)
-            }
-        }
-
-        # Add detailed segments if requested (optional)
-        if detailed_segments:
-            response_data['segments'] = result['segments']
-
-        # Return response
-        response = {
-            'success': True,
-            'message': 'Transcription completed successfully',
-            'data': response_data
-        }
-
-        return jsonify(response), 200
-
-    except AudioFileError as e:
-        return jsonify({
-            'success': False,
-            'message': str(e),
-            'data': None
-        }), 400
-
-    except AudioFormatError as e:
-        return jsonify({
-            'success': False,
-            'message': str(e),
-            'data': None
-        }), 400
-
-    except AudioSizeError as e:
-        return jsonify({
-            'success': False,
-            'message': str(e),
-            'data': None
-        }), 413
-
-    except DiarizationError as e:
-        return jsonify({
-            'success': False,
-            'message': f'Speaker diarization failed: {str(e)}',
-            'data': None
-        }), 500
-
-    except TranscriptionError as e:
-        return jsonify({
-            'success': False,
-            'message': f'Transcription failed: {str(e)}',
-            'data': None
-        }), 500
-
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({
-            'success': False,
-            'message': 'Internal server error',
-            'data': {'error_details': str(e)}
-        }), 500
+    data = dict(job.result)
+    if request.form.get('detailed_segments', 'false').lower() != 'true':
+        data.pop('segments', None)
+    data['timings'] = {**data['timings'], 'request_total': round(time.time() - request_start, 2)}
+    return jsonify({
+        'success': True,
+        'message': 'Transcription completed successfully',
+        'data': data
+    }), 200
 
 
 @app.errorhandler(413)

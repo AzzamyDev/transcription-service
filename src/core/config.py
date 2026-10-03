@@ -37,6 +37,16 @@ class Config:
     MERGE_GAP_THRESHOLD = 1.0  # seconds
     OVERLAP_THRESHOLD = 0.3
 
+    # Per-speaker tracks: segments quieter than this, or that Whisper rates
+    # as non-speech with low confidence, are silence it transcribed anyway.
+    SILENCE_DB = float(os.getenv('SILENCE_DB', '-45'))
+    NO_SPEECH_THRESHOLD = 0.6
+    LOGPROB_THRESHOLD = -1.0
+
+    # Background jobs
+    ASR_CONCURRENCY = int(os.getenv('ASR_CONCURRENCY', '1'))
+    ASR_MAX_PENDING = int(os.getenv('ASR_MAX_PENDING', '200'))
+
     @classmethod
     def validate(cls) -> tuple[bool, list[str]]:
         """

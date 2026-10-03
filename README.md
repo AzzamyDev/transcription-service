@@ -222,6 +222,42 @@ GET /download/<filename>
 GET /formats
 ```
 
+### Background jobs (recommended)
+
+`POST /transcribe` answers only when the transcription is done, which takes
+minutes for long calls. `POST /jobs` answers at once with `202` and a job id;
+one worker thread per `ASR_CONCURRENCY` (default 1) runs the GPU work.
+
+**Per-speaker tracks** (no diarization; the speaker is known):
+
+```bash
+curl -X POST http://localhost:8000/jobs \
+  -F job_key=<call id> \
+  -F tracks=@inmate.mp3 -F labels=INMATE      -F names="Warga Binaan" -F offsets=0 \
+  -F tracks=@family.mp3 -F labels=FAMILY:abc  -F names="Ibu"          -F offsets=8.28
+```
+
+`offsets` is when each track starts in the call, in seconds; segments come
+back on the call's timeline, labelled with the track's label. Silence and text
+Whisper invents over it are dropped (`SILENCE_DB`, default -45).
+
+**One mixed file** (diarized): `-F file=@call.mp3 -F num_speakers=2`
+(or `min_speakers` / `max_speakers`).
+
+Sending the same `job_key` again returns the job already queued, running or
+done for it. Poll the job:
+
+```bash
+curl http://localhost:8000/jobs/<job_id>
+# data.status: queued (data.position = jobs ahead) | processing | done | failed
+# done -> data.result: transcript, segments, summary, sentiment, flagged_phrases, statistics, timings
+```
+
+Finished jobs are kept for 24 hours; a restart drops them, so clients should
+resubmit a job that answers 404. `ASR_MAX_PENDING` (default 200) caps the queue.
+
+Tests (no GPU needed): `pip install pytest flask flask-cors flask-swagger-ui python-dotenv numpy && python -m pytest tests`
+
 ## Output Formats
 
 ### TXT Format

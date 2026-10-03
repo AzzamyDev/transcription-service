@@ -29,7 +29,7 @@ except Exception as e:
 # Inject pipeline into Flask app
 print("\n[3/3] Starting API server...")
 import src.api.api as api_module
-api_module.pipeline = pipeline
+api_module.init(pipeline)
 print("✓ Pipeline injected into Flask app")
 
 # Start Flask development server

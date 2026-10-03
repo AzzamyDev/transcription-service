@@ -3,7 +3,8 @@ FINAL CLEAN VERSION - Perfect Output
 No spinner conflicts, just clean step-by-step progress
 """
 import time
-from typing import Dict, Optional, Union, BinaryIO
+from io import BytesIO
+from typing import Dict, List, Optional, Union, BinaryIO
 
 from src.core.config import Config
 from src.core.exceptions import *
@@ -153,6 +154,93 @@ class AudioTranscriptionPipeline:
         except Exception as e:
             print(f"\n✗ ERROR: {str(e)}", flush=True)
             raise
+
+    def process_tracks(
+        self,
+        tracks: List[Dict[str, any]],
+        include_summary: bool = True
+    ) -> Dict[str, any]:
+        """
+        Transcribe a call recorded one track per speaker. Each track is
+        {'label', 'name', 'offset', 'audio'}: the speaker is known, so there is
+        no diarization; 'offset' is when the track starts in the call, in
+        seconds, and puts every segment on the call's timeline.
+        """
+        timings = {'validation': 0.0, 'diarization': 0.0}
+        total_start = time.time()
+
+        print("\n" + "=" * 80, flush=True)
+        print(f"STARTING TRACK TRANSCRIPTION ({len(tracks)} tracks)", flush=True)
+        print("=" * 80, flush=True)
+
+        step_start = time.time()
+        prepared = []
+        duration = 0.0
+        for track in tracks:
+            audio_tensor, sample_rate = self.audio_processor.prepare_for_processing(
+                BytesIO(track['audio']), normalize=False
+            )
+            samples = audio_tensor.squeeze(0).numpy()
+            duration = max(duration, track['offset'] + len(samples) / sample_rate)
+            prepared.append((track, samples, sample_rate))
+        timings['preparation'] = time.time() - step_start
+
+        step_start = time.time()
+        segments = []
+        for track, samples, sample_rate in prepared:
+            speech = self.transcriber.transcribe_speech(
+                samples, sample_rate, language=self.language
+            )
+            print(f"    {track['label']}: {len(speech)} segments", flush=True)
+            for seg in speech:
+                start = round(seg['start'] + track['offset'], 2)
+                end = round(seg['end'] + track['offset'], 2)
+                segments.append({
+                    'speaker': track['label'],
+                    'start': start,
+                    'end': end,
+                    'duration': round(end - start, 2),
+                    'text': seg['text'],
+                })
+        segments.sort(key=lambda seg: (seg['start'], seg['end']))
+        merged_segments = self.transcriber.merge_consecutive_segments(segments)
+        timings['transcription'] = time.time() - step_start
+
+        # The summary reads names, not track labels.
+        names = {track['label']: track.get('name') or track['label'] for track in tracks}
+        named = [{**seg, 'speaker': names[seg['speaker']]} for seg in merged_segments]
+        transcript_text = TranscriptFormatter.format_segments_to_text(
+            named, include_timestamps=False
+        )
+        summary = None
+        if include_summary and merged_segments and self.summarizer and self.summarizer.is_available():
+            step_start = time.time()
+            summary = self.summarizer.create_summary(
+                transcript_text,
+                TranscriptFormatter.calculate_statistics(named),
+                language=self.language
+            )
+            timings['summarization'] = time.time() - step_start
+        else:
+            timings['summarization'] = 0
+
+        timings['total'] = time.time() - total_start
+        self._display_timing_summary(timings)
+
+        return {
+            'success': True,
+            'audio_info': {
+                'duration_seconds': round(duration, 2),
+                'duration_minutes': round(duration / 60, 2),
+                'sample_rate': Config.TARGET_SAMPLE_RATE,
+            },
+            'segments': merged_segments,
+            'statistics': TranscriptFormatter.calculate_statistics(merged_segments),
+            'summary': summary,
+            'sentiment': analyze_sentiment(summary or ''),
+            'flagged_phrases': extract_flagged_phrases(named),
+            'timings': timings
+        }
 
     def _display_timing_summary(self, timings: Dict[str, float]):
         print("\n" + "=" * 80, flush=True)

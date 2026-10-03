@@ -38,13 +38,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
   CMD curl -f http://localhost:8000/health || exit 1
 
-CMD ["gunicorn", \
-     "--bind", "0.0.0.0:8000", \
-     "--workers", "1", \
-     "--worker-class", "sync", \
-     "--timeout", "900", \
-     "--access-logfile", "-", \
-     "--error-logfile", "-", \
-     "--log-level", "info", \
-     "--config", "gunicorn.py", \
-     "wsgi:app"]
+# Workers, threads and timeouts live in gunicorn.py; flags here would
+# override them (a sync worker blocks every request during a transcription).
+CMD ["gunicorn", "--config", "gunicorn.py", "wsgi:app"]
