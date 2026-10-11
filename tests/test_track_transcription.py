@@ -32,6 +32,7 @@ def test_drops_a_stock_line_whisper_is_unsure_of_and_shortens_loops():
     transcriber.transcribe_tensor = lambda *args, **kwargs: {'segments': [
         {'start': 0.0, 'end': 2.0, 'text': ' Terima kasih.', 'no_speech_prob': 0.2, 'avg_logprob': -0.9},
         {'start': 3.0, 'end': 5.0, 'text': ' Terima kasih ya Bu.', 'no_speech_prob': 0.05, 'avg_logprob': -0.1},
+        {'start': 5.5, 'end': 5.8, 'text': ' terima kasih', 'no_speech_prob': 0.05, 'avg_logprob': -0.1},
         {'start': 6.0, 'end': 9.0, 'text': ' udah udah udah udah udah udah', 'no_speech_prob': 0.1, 'avg_logprob': -0.4},
     ]}
 

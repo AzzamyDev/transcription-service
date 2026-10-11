@@ -53,6 +53,8 @@ class Config:
     LOGPROB_THRESHOLD = -1.0
     # Below this, a stock line such as "Terima kasih." is taken as invented.
     INVENTED_MIN_CONFIDENCE = 0.6
+    # Faster than speech: "terima kasih" in 0.3 s is a noise, not words.
+    MAX_CHARS_PER_S = 22
     # A pause longer than this between words starts a new transcript line.
     SPLIT_PAUSE_S = 1.0
     # Speech parted by more than this is decoded separately; a region is

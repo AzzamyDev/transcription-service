@@ -201,10 +201,13 @@ class WhisperTranscriber:
                 confidence = seg.get('confidence')
                 if confidence is None:
                     confidence = confidence_of(seg.get('avg_logprob', 0))
-                # A stock line ("Terima kasih.") said with little certainty is
-                # Whisper filling a gap, not the caller.
-                if is_invented(text) and confidence < Config.INVENTED_MIN_CONFIDENCE:
-                    continue
+                # A stock line ("Terima kasih.") said with little certainty, or
+                # faster than anyone can say it, is Whisper reading a click or
+                # a breath, not the caller.
+                if is_invented(text):
+                    rate = len(text) / max(seg['end'] - seg['start'], 0.01)
+                    if confidence < Config.INVENTED_MIN_CONFIDENCE or rate > Config.MAX_CHARS_PER_S:
+                        continue
                 segments.append({
                     'start': float(seg['start']),
                     'end': float(seg['end']),
