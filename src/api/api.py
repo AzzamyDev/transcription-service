@@ -94,6 +94,7 @@ def _format_result(result):
     return {
         'transcript': "\n".join(transcript_lines),
         'summary': result['summary'],
+        'summary_status': result.get('summary_status'),
         'sentiment': result['sentiment'],
         'flagged_phrases': result['flagged_phrases'],
         'segments': result['segments'],
@@ -365,7 +366,11 @@ def health():
                 'pipeline': 'loaded',
                 'whisper': 'loaded',
                 'diarizer': 'loaded',
-                'gpu': 'available' if torch.cuda.is_available() else 'unavailable'
+                'gpu': 'available' if torch.cuda.is_available() else 'unavailable',
+                'summarizer': (
+                    pipe.summarizer.last_known_status() if pipe.summarizer
+                    else 'disabled'
+                ),
             },
             'jobs': jobs.stats() if jobs else None
         }

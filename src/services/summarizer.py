@@ -53,6 +53,12 @@ class AISummarizer:
         self._available_checked_at = now
         return self._available
 
+    def last_known_status(self) -> str:
+        """For /health: the last check, without calling Ollama."""
+        if self._available is None:
+            return 'unknown'
+        return 'available' if self._available else 'unavailable'
+
     def _generate(self, prompt: str, max_tokens: int = 800) -> str:
         """Kirim prompt ke Ollama dan ambil hasilnya"""
         try:
@@ -60,6 +66,8 @@ class AISummarizer:
                 "model": self.model,
                 "prompt": prompt,
                 "stream": False,
+                # Calls arrive minutes apart; reloading 9 GB each time is slow.
+                "keep_alive": "30m",
                 "options": {
                     "temperature": 0,
                     "num_predict": max_tokens,

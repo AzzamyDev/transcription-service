@@ -22,6 +22,7 @@ class FakePipeline:
         return {
             'segments': segments,
             'summary': 'ringkasan',
+            'summary_status': 'ok',
             'sentiment': 'NEUTRAL',
             'flagged_phrases': [],
             'audio_info': {'duration_seconds': 10, 'duration_minutes': 0.17, 'sample_rate': 16000},

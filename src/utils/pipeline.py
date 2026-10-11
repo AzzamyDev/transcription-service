@@ -107,25 +107,19 @@ class AudioTranscriptionPipeline:
             print(f"    Generated {len(merged_segments)} final segments", flush=True)
 
             # Step 5
-            summary = None
             transcript_text = TranscriptFormatter.format_segments_to_text(
                 merged_segments,
                 include_timestamps=False
             )
-            if include_summary and self.summarizer and self.summarizer.is_available():
-                print("\n[5/5] Generating AI summary", flush=True)
-                step_start = time.time()
-                statistics = TranscriptFormatter.calculate_statistics(merged_segments)
-                summary = self.summarizer.create_summary(
-                    transcript_text,
-                    statistics,
-                    language=self.language
-                )
-                timings['summarization'] = time.time() - step_start
-                print(f"✓ [5/5] Summary generated - {timings['summarization']:.2f}s", flush=True)
-            else:
-                print("\n[5/5] Skipping AI summary", flush=True)
-                timings['summarization'] = 0
+            print("\n[5/5] AI summary", flush=True)
+            step_start = time.time()
+            summary, summary_status = self._summarize(
+                transcript_text,
+                TranscriptFormatter.calculate_statistics(merged_segments),
+                include_summary
+            )
+            timings['summarization'] = time.time() - step_start
+            print(f"✓ [5/5] Summary {summary_status} - {timings['summarization']:.2f}s", flush=True)
 
             # Sentiment & flagged phrases analysis
             sentiment = analyze_sentiment(summary or '')
@@ -146,6 +140,7 @@ class AudioTranscriptionPipeline:
                 'segments': merged_segments,
                 'statistics': statistics,
                 'summary': summary,
+                'summary_status': summary_status,
                 'sentiment': sentiment,
                 'flagged_phrases': flagged_phrases,
                 'timings': timings
@@ -212,17 +207,13 @@ class AudioTranscriptionPipeline:
         transcript_text = TranscriptFormatter.format_segments_to_text(
             named, include_timestamps=False
         )
-        summary = None
-        if include_summary and merged_segments and self.summarizer and self.summarizer.is_available():
-            step_start = time.time()
-            summary = self.summarizer.create_summary(
-                transcript_text,
-                TranscriptFormatter.calculate_statistics(named),
-                language=self.language
-            )
-            timings['summarization'] = time.time() - step_start
-        else:
-            timings['summarization'] = 0
+        step_start = time.time()
+        summary, summary_status = self._summarize(
+            transcript_text,
+            TranscriptFormatter.calculate_statistics(named),
+            include_summary
+        )
+        timings['summarization'] = time.time() - step_start
 
         timings['total'] = time.time() - total_start
         self._display_timing_summary(timings)
@@ -237,10 +228,32 @@ class AudioTranscriptionPipeline:
             'segments': merged_segments,
             'statistics': TranscriptFormatter.calculate_statistics(merged_segments),
             'summary': summary,
+            'summary_status': summary_status,
             'sentiment': analyze_sentiment(summary or ''),
             'flagged_phrases': extract_flagged_phrases(named),
             'timings': timings
         }
+
+    def _summarize(self, transcript_text: str, statistics: Dict, include_summary: bool):
+        """
+        (summary, status), status being ok, skipped, empty, unavailable or
+        failed. A summary that fails never fails the transcript.
+        """
+        if not include_summary:
+            return None, 'skipped'
+        if not transcript_text.strip():
+            return None, 'empty'
+        if not self.summarizer or not self.summarizer.is_available():
+            print("✗ Summary skipped: Ollama unavailable", flush=True)
+            return None, 'unavailable'
+        try:
+            summary = self.summarizer.create_summary(
+                transcript_text, statistics, language=self.language
+            )
+        except SummarizationError as e:
+            print(f"✗ Summary failed: {e}", flush=True)
+            return None, 'failed'
+        return (summary, 'ok') if summary else (None, 'failed')
 
     def _display_timing_summary(self, timings: Dict[str, float]):
         print("\n" + "=" * 80, flush=True)

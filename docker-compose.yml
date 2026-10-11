@@ -19,6 +19,10 @@ services:
     ports:
       - "8000:8000"
 
+    # Ollama runs on the host; inside the container localhost is the container.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
     # Volumes
     volumes:
       - ./outputs:/app/outputs
@@ -31,7 +35,7 @@ services:
       HUGGINGFACE_TOKEN: ${HUGGINGFACE_TOKEN}
       WHISPER_MODEL: ${WHISPER_MODEL:-large-v3}
       LANGUAGE: ${LANGUAGE:-id}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://localhost:11434}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:14b}
       CUDA_VISIBLE_DEVICES: 0
       FLASK_ENV: production
