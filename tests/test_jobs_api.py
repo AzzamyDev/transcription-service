@@ -17,6 +17,7 @@ class FakePipeline:
         self.release = threading.Event()
         self.release.set()
         self.calls = []
+        self.analyzer = self
 
     def _result(self, segments):
         return {
@@ -37,6 +38,11 @@ class FakePipeline:
             {'speaker': t['label'], 'start': t['offset'], 'end': t['offset'] + 1, 'duration': 1, 'text': 'halo'}
             for t in tracks
         ])
+
+    def analyze(self, segments, hints):
+        self.calls.append(('analysis', len(segments), hints))
+        status = 'unavailable' if hints == ['ollama-down'] else 'ok'
+        return {'status': status, 'summary': 'ringkasan', 'findings': []}
 
     def process(self, audio, num_speakers=None, min_speakers=None, max_speakers=None, include_summary=True):
         self.release.wait(5)
@@ -172,3 +178,40 @@ def test_legacy_transcribe_refuses_when_too_many_callers_wait(client):
         for ok in taken:
             if ok:
                 api.sync_waiters.release()
+
+
+def test_analysis_is_queued_and_polled_like_a_transcription(client):
+    res = client.post('/analyses', json={
+        'job_key': 'analyze-1',
+        'segments': [{'speaker': 'Warga Binaan', 'start': 0, 'end': 2, 'text': 'Halo Bu'}],
+        'hints': ['sabu'],
+    })
+    assert res.status_code == 202
+    data = wait_done(client, res.get_json()['data']['job_id'])
+    assert data['status'] == 'done'
+    assert data['result']['summary'] == 'ringkasan'
+    assert client.pipeline.calls == [('analysis', 1, ['sabu'])]
+
+
+@pytest.mark.parametrize('body', [
+    {},
+    {'segments': 'x'},
+    {'segments': [{'speaker': 'A', 'start': 5, 'end': 1, 'text': 'x'}]},
+    {'segments': [{'speaker': 'A', 'text': 'x'}]},
+    {'segments': [], 'hints': [1]},
+])
+def test_analysis_rejects_a_malformed_body(client, body):
+    assert client.post('/analyses', json=body).status_code == 400
+
+
+def test_an_analysis_the_llm_could_not_make_fails_and_is_not_reused(client):
+    body = {
+        'job_key': 'analyze-2',
+        'segments': [{'speaker': 'Warga Binaan', 'start': 0, 'end': 2, 'text': 'Halo'}],
+        'hints': ['ollama-down'],
+    }
+    first = client.post('/analyses', json=body).get_json()['data']['job_id']
+    data = wait_done(client, first)
+    assert data['status'] == 'failed' and data['error'] == 'unavailable'
+    second = client.post('/analyses', json=body).get_json()['data']['job_id']
+    assert second != first

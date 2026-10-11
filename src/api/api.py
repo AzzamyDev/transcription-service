@@ -64,6 +64,12 @@ def init(loaded_pipeline):
 def _run_job(payload):
     """Runs on a job worker thread: the only place the GPU is used"""
     pipe = get_pipeline()
+    if payload['kind'] == 'analysis':
+        result = pipe.analyzer.analyze(payload['segments'], payload['hints'])
+        # A failed job is not kept under its key, so a resend is read again.
+        if result['status'] in ('unavailable', 'failed'):
+            raise AnalysisNotDone(result['status'])
+        return result
     if payload['kind'] == 'tracks':
         result = pipe.process_tracks(
             payload['tracks'], include_summary=payload['include_summary']
@@ -77,6 +83,10 @@ def _run_job(payload):
             include_summary=payload['include_summary'],
         )
     return _format_result(result)
+
+
+class AnalysisNotDone(Exception):
+    """The LLM could not read the transcript: 'unavailable' or 'failed'."""
 
 
 def _format_result(result):
@@ -443,6 +453,46 @@ def create_job():
 
     try:
         job = jobs.submit(payload, key)
+    except QueueFullError as e:
+        return _error(f'Queue full: {e}', 503)
+    return jsonify({'success': True, 'message': 'Queued', 'data': _job_view(job)}), 202
+
+
+MAX_ANALYSIS_SEGMENTS = 5000
+
+
+@app.route('/analyses', methods=['POST'])
+def create_analysis():
+    """
+    Queue the analysis of a transcript already made (summary and findings
+    for supervision). Body: {job_key, segments: [{speaker, start, end,
+    text}], hints: [keyword]}. Polled through /jobs/<id> like a
+    transcription, and run by the same worker so the GPU does one thing at
+    a time.
+    """
+    body = request.get_json(silent=True) or {}
+    segments = body.get('segments')
+    hints = body.get('hints') or []
+    if not isinstance(segments, list) or len(segments) > MAX_ANALYSIS_SEGMENTS:
+        return _error(f'segments must be a list of at most {MAX_ANALYSIS_SEGMENTS}', 400)
+    if not isinstance(hints, list) or len(hints) > 200 \
+            or not all(isinstance(h, str) and len(h) <= 100 for h in hints):
+        return _error('hints must be at most 200 short strings', 400)
+    clean = []
+    for seg in segments:
+        try:
+            start, end = float(seg['start']), float(seg['end'])
+            speaker, text = str(seg['speaker'])[:100], str(seg['text'])[:4000]
+        except (KeyError, TypeError, ValueError):
+            return _error('Every segment needs speaker, start, end and text', 400)
+        if start < 0 or end < start:
+            return _error('Segment times are invalid', 400)
+        clean.append({'speaker': speaker, 'start': start, 'end': end, 'text': text})
+    try:
+        job = jobs.submit(
+            {'kind': 'analysis', 'segments': clean, 'hints': hints},
+            body.get('job_key') or None,
+        )
     except QueueFullError as e:
         return _error(f'Queue full: {e}', 503)
     return jsonify({'success': True, 'message': 'Queued', 'data': _job_view(job)}), 202

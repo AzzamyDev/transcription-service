@@ -18,6 +18,9 @@ OLLAMA_MODEL = "qwen2.5:14b"
 # Re-check Ollama availability every 5 minutes so a temporary outage
 # at worker startup doesn't permanently disable summarization.
 _AVAILABILITY_TTL = 300
+# Every request must ask for the same context, or Ollama reloads the model.
+# 8k fits a transcript chunk and keeps VRAM free for the other models.
+CONTEXT_TOKENS = 8192
 
 
 class AISummarizer:
@@ -59,7 +62,15 @@ class AISummarizer:
             return 'unknown'
         return 'available' if self._available else 'unavailable'
 
-    def _generate(self, prompt: str, max_tokens: int = 800) -> str:
+    def generate_json(self, prompt: str, schema: dict, max_tokens: int = 1500) -> dict:
+        """A reply constrained to a JSON schema, parsed"""
+        text = self._generate(prompt, max_tokens=max_tokens, schema=schema)
+        try:
+            return json.loads(text)
+        except ValueError:
+            raise SummarizationError(f"Ollama returned invalid JSON: {text[:200]}")
+
+    def _generate(self, prompt: str, max_tokens: int = 800, schema: Optional[dict] = None) -> str:
         """Kirim prompt ke Ollama dan ambil hasilnya"""
         try:
             payload = {
@@ -71,14 +82,17 @@ class AISummarizer:
                 "options": {
                     "temperature": 0,
                     "num_predict": max_tokens,
+                    "num_ctx": CONTEXT_TOKENS,
                     "top_p": 0.9,
                 }
             }
+            if schema is not None:
+                payload["format"] = schema
 
             response = requests.post(
                 f"{self.base_url}/api/generate",
                 json=payload,
-                timeout=120  # model lokal bisa lebih lambat
+                timeout=300  # model lokal bisa lebih lambat
             )
 
             if response.status_code != 200:

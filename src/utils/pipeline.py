@@ -12,6 +12,7 @@ from src.utils.audio_processor import AudioProcessor
 from src.services.diarizer import SpeakerDiarizer
 from src.services.transcriber import WhisperTranscriber
 from src.services.summarizer import AISummarizer
+from src.services.analyzer import CallAnalyzer
 from src.utils.formatter import TranscriptFormatter
 from src.utils.analyzer import analyze_sentiment, extract_flagged_phrases
 
@@ -39,6 +40,7 @@ class AudioTranscriptionPipeline:
         self.diarizer = SpeakerDiarizer()
         self.transcriber = WhisperTranscriber(whisper_model)
         self.summarizer = AISummarizer() if enable_summary else None
+        self.analyzer = CallAnalyzer(self.summarizer)
         self.language = language or Config.LANGUAGE
 
         print("=" * 80, flush=True)
