@@ -64,8 +64,9 @@ def init(loaded_pipeline):
 def _run_job(payload):
     """Runs on a job worker thread: the only place the GPU is used"""
     pipe = get_pipeline()
-    if payload['kind'] == 'analysis':
-        result = pipe.analyzer.analyze(payload['segments'], payload['hints'])
+    if payload['kind'] in ('analysis', 'message_analysis'):
+        analyzer = pipe.analyzer if payload['kind'] == 'analysis' else pipe.message_analyzer
+        result = analyzer.analyze(payload['items'], payload['hints'])
         # A failed job is not kept under its key, so a resend is read again.
         if result['status'] in ('unavailable', 'failed'):
             raise AnalysisNotDone(result['status'])
@@ -471,13 +472,15 @@ def create_analysis():
     a time.
     """
     body = request.get_json(silent=True) or {}
-    segments = body.get('segments')
     hints = body.get('hints') or []
-    if not isinstance(segments, list) or len(segments) > MAX_ANALYSIS_SEGMENTS:
-        return _error(f'segments must be a list of at most {MAX_ANALYSIS_SEGMENTS}', 400)
     if not isinstance(hints, list) or len(hints) > 200 \
             or not all(isinstance(h, str) and len(h) <= 100 for h in hints):
         return _error('hints must be at most 200 short strings', 400)
+    if body.get('mode') == 'messages':
+        return _queue_message_analysis(body, hints)
+    segments = body.get('segments')
+    if not isinstance(segments, list) or len(segments) > MAX_ANALYSIS_SEGMENTS:
+        return _error(f'segments must be a list of at most {MAX_ANALYSIS_SEGMENTS}', 400)
     clean = []
     for seg in segments:
         try:
@@ -490,7 +493,41 @@ def create_analysis():
         clean.append({'speaker': speaker, 'start': start, 'end': end, 'text': text})
     try:
         job = jobs.submit(
-            {'kind': 'analysis', 'segments': clean, 'hints': hints},
+            {'kind': 'analysis', 'items': clean, 'hints': hints},
+            body.get('job_key') or None,
+        )
+    except QueueFullError as e:
+        return _error(f'Queue full: {e}', 503)
+    return jsonify({'success': True, 'message': 'Queued', 'data': _job_view(job)}), 202
+
+
+MAX_ANALYSIS_MESSAGES = 300
+
+
+def _queue_message_analysis(body, hints):
+    """
+    A conversation of messages: {mode: 'messages', job_key, hints, messages:
+    [{id, speaker, at, text, new, voice}]}; only `new` ones can be findings.
+    """
+    messages = body.get('messages')
+    if not isinstance(messages, list) or len(messages) > MAX_ANALYSIS_MESSAGES:
+        return _error(f'messages must be a list of at most {MAX_ANALYSIS_MESSAGES}', 400)
+    clean = []
+    for msg in messages:
+        if not isinstance(msg, dict) or not isinstance(msg.get('id'), str) \
+                or not msg['id'] or len(msg['id']) > 64:
+            return _error('Every message needs an id', 400)
+        clean.append({
+            'id': msg['id'],
+            'speaker': str(msg.get('speaker', ''))[:100],
+            'at': str(msg.get('at', ''))[:32],
+            'text': str(msg.get('text') or '')[:4000],
+            'new': msg.get('new') is True,
+            'voice': msg.get('voice') is True,
+        })
+    try:
+        job = jobs.submit(
+            {'kind': 'message_analysis', 'items': clean, 'hints': hints},
             body.get('job_key') or None,
         )
     except QueueFullError as e:

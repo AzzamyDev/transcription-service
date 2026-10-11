@@ -234,9 +234,11 @@ def _quoted(text: str) -> str:
     return _one_line(text).replace('"', "'")
 
 
-def review_prompt(category: str, quote: str, reason: str, context: List[str]) -> str:
+def review_prompt(
+    category: str, quote: str, reason: str, context: List[str], medium: str = 'panggilan'
+) -> str:
     quote, reason = _quoted(quote), _quoted(reason)
-    return f"""Anda pemeriksa kedua di lembaga pemasyarakatan. Pemeriksa pertama menandai sebuah ucapan dalam panggilan antara Warga Binaan (WB) dan keluarganya. Tugas Anda menguji apakah tanda itu benar. Pemeriksa pertama sering keliru, jadi bersikaplah skeptis: tanda yang keliru membuat orang yang tidak bersalah dicurigai.
+    return f"""Anda pemeriksa kedua di lembaga pemasyarakatan. Pemeriksa pertama menandai sebuah ucapan dalam {medium} antara Warga Binaan (WB) dan keluarganya. Tugas Anda menguji apakah tanda itu benar. Pemeriksa pertama sering keliru, jadi bersikaplah skeptis: tanda yang keliru membuat orang yang tidak bersalah dicurigai.
 
 Kategori yang dituduhkan: {category} ({CATEGORIES[category]})
 Ucapan yang ditandai: "{quote}"

@@ -18,6 +18,7 @@ class FakePipeline:
         self.release.set()
         self.calls = []
         self.analyzer = self
+        self.message_analyzer = self
 
     def _result(self, segments):
         return {
@@ -215,3 +216,24 @@ def test_an_analysis_the_llm_could_not_make_fails_and_is_not_reused(client):
     assert data['status'] == 'failed' and data['error'] == 'unavailable'
     second = client.post('/analyses', json=body).get_json()['data']['job_id']
     assert second != first
+
+
+def test_a_message_conversation_is_queued_with_its_new_flags(client):
+    res = client.post('/analyses', json={
+        'mode': 'messages',
+        'job_key': 'messages-1',
+        'hints': [],
+        'messages': [
+            {'id': 'vm-1', 'speaker': 'Warga Binaan', 'at': '11/10 09:00', 'text': 'Halo Bu', 'new': False},
+            {'id': 'rp-2', 'speaker': 'Keluarga', 'at': '11/10 09:05', 'text': 'Halo Nak', 'new': True, 'voice': True},
+        ],
+    })
+    assert res.status_code == 202
+    data = wait_done(client, res.get_json()['data']['job_id'])
+    assert data['status'] == 'done'
+    assert client.pipeline.calls == [('analysis', 2, [])]
+
+
+def test_messages_need_ids(client):
+    res = client.post('/analyses', json={'mode': 'messages', 'messages': [{'text': 'x'}]})
+    assert res.status_code == 400
