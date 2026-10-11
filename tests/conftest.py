@@ -8,6 +8,7 @@ for root, names in {
     'torch': ['torch'],
     'torchaudio': ['torchaudio'],
     'whisper': ['whisper'],
+    'faster_whisper': ['faster_whisper', 'faster_whisper.vad'],
     'pydub': ['pydub'],
     'soundfile': ['soundfile'],
     'scipy': ['scipy', 'scipy.signal'],

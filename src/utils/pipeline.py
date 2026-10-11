@@ -198,6 +198,7 @@ class AudioTranscriptionPipeline:
                     'end': end,
                     'duration': round(end - start, 2),
                     'text': seg['text'],
+                    'confidence': seg.get('confidence'),
                 })
         segments.sort(key=lambda seg: (seg['start'], seg['end']))
         merged_segments = self.transcriber.merge_consecutive_segments(segments)

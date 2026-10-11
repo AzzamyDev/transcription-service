@@ -1,7 +1,7 @@
 # Core
 torch==2.11.0
 torchaudio==2.11.0
-openai-whisper==20250625
+faster-whisper==1.1.1
 
 # Pyannote
 pyannote-audio==4.0.4

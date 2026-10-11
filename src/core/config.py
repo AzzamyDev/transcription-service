@@ -25,6 +25,15 @@ class Config:
     # Model settings
     WHISPER_MODEL = os.getenv('WHISPER_MODEL', 'large-v3')
     LANGUAGE = os.getenv('LANGUAGE', 'id')
+    # Kept on a volume so a new container does not download it again.
+    MODEL_DIR = os.getenv('MODEL_DIR', '/app/models')
+    # Words of prison calls Whisper should lean towards when unsure.
+    HOTWORDS = os.getenv(
+        'HOTWORDS',
+        'Warga Binaan, WBP, lapas, rutan, kunjungan, remisi, pembebasan bersyarat, '
+        'asimilasi, sidang, pengacara, koperasi, saldo, voucher, wartel, '
+        'Assalamualaikum, Waalaikumsalam, alhamdulillah, insyaallah',
+    )
 
     # API Keys
     HUGGINGFACE_TOKEN = os.getenv('HUGGINGFACE_TOKEN', '')
@@ -42,6 +51,14 @@ class Config:
     SILENCE_DB = float(os.getenv('SILENCE_DB', '-45'))
     NO_SPEECH_THRESHOLD = 0.6
     LOGPROB_THRESHOLD = -1.0
+    # Below this, a stock line such as "Terima kasih." is taken as invented.
+    INVENTED_MIN_CONFIDENCE = 0.6
+    # A pause longer than this between words starts a new transcript line.
+    SPLIT_PAUSE_S = 1.0
+    # Speech parted by more than this is decoded separately; a region is
+    # kept within Whisper's 30-second window.
+    REGION_GAP_S = 2.0
+    REGION_MAX_S = 28.0
 
     # Background jobs. Queued jobs hold their audio in memory.
     ASR_MAX_PENDING = int(os.getenv('ASR_MAX_PENDING', '30'))

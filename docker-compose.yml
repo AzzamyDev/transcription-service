@@ -27,6 +27,8 @@ services:
     volumes:
       - ./outputs:/app/outputs
       - ./temp:/app/temp
+      # Whisper weights, downloaded once.
+      - ./models:/app/models
 
     # Environment
     env_file:

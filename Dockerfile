@@ -22,8 +22,8 @@ COPY . .
 
 RUN useradd -m -u 1000 appuser && \
     chown -R appuser:appuser /app && \
-    mkdir -p /app/outputs /app/temp && \
-    chown -R appuser:appuser /app/outputs /app/temp
+    mkdir -p /app/outputs /app/temp /app/models && \
+    chown -R appuser:appuser /app/outputs /app/temp /app/models
 
 USER appuser
 

@@ -8,6 +8,7 @@ import re
 from typing import Dict, List, Optional
 
 from src.core.exceptions import SummarizationError
+from src.services.hallucinations import collapse_loops, is_invented, normalize
 
 CATEGORIES = {
     'NARCOTICS': 'narkoba: memasukkan, menjual, memesan atau memakai narkotika',
@@ -42,14 +43,6 @@ CLARITY = ['JELAS', 'SEBAGIAN', 'TIDAK_JELAS']
 SENTIMENT = {'POSITIF': 'POSITIVE', 'NETRAL': 'NEUTRAL', 'NEGATIF': 'NEGATIVE'}
 SEVERITY = {'TINGGI': 'HIGH', 'SEDANG': 'MEDIUM'}
 
-# Whole lines Whisper writes over silence, noise or music.
-_INVENTED = re.compile(
-    r'^(terima ?kasih( (banyak|ya|telah menonton|sudah menonton|atas perhatiannya))*'
-    r'|sampai jumpa( lagi)?( di video selanjutnya)?|selamat menonton|jangan lupa (like|subscribe).*'
-    r'|subtitle.*|disponsori oleh.*|(yeay|yey|wow|ah|eh|oh|uh|hm+|hmm+|hai|halo)( (yeay|yey|wow|ah|eh|oh|uh|hm+|hmm+|hai|halo))*)$'
-)
-# A run of the same 1-4 words, e.g. "udah udah udah udah ...".
-_LOOP = re.compile(r'\b((?:\S+\s+){0,3}?\S+)(?:\s+\1\b){3,}', re.IGNORECASE)
 
 CHUNK_CHARS = 12000
 MIN_WORDS = 8
@@ -74,14 +67,6 @@ _TAMPER = re.compile(
 )
 
 
-def normalize(text: str) -> str:
-    return re.sub(r'\s+', ' ', re.sub(r'[^\w\s]', ' ', text.lower())).strip()
-
-
-def collapse_loops(text: str) -> str:
-    return _LOOP.sub(lambda m: f'{m.group(1)} {m.group(1)} …', text)
-
-
 def _one_line(text: str) -> str:
     # A line break inside a segment could forge transcript lines in the prompt.
     return re.sub(r'\s+', ' ', text).strip()
@@ -93,7 +78,7 @@ def clean_segments(segments: List[Dict]) -> List[Dict]:
     for seg in segments:
         text = collapse_loops(_one_line(str(seg.get('text', '')))[:MAX_SEGMENT_CHARS])
         norm = normalize(text)
-        if not norm or _INVENTED.match(norm):
+        if not norm or is_invented(text):
             continue
         speaker = re.sub(r"[^\w\s().'-]", '', _one_line(str(seg.get('speaker', ''))))[:60]
         kept.append({**seg, 'speaker': speaker or 'Tidak diketahui', 'text': text})
