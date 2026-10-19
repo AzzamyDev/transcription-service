@@ -96,3 +96,15 @@ def test_a_long_message_is_read_in_parts_not_cut():
     kept = clean_messages([msg('long', 'a ' * 900 + 'selipkan sabu di nasi')])
     assert [k['id'] for k in kept] == ['long', 'long']
     assert kept[-1]['text'].endswith('selipkan sabu di nasi')
+
+
+def test_money_within_the_family_and_unclear_dialect_are_ruled_out():
+    llm = ScriptedLLM({'temuan': [FOUND]}, [CONFIRMED])
+    MessageAnalyzer(llm).analyze(CHAT, [])
+    first, review = llm.prompts[0], llm.prompts[1]
+    # Calls and messages share one rule set.
+    assert analyzer.RULES in first
+    assert 'Uang antara WB dan keluarganya sendiri' in first
+    assert 'Bahasa daerah' in first
+    assert 'korban di luar keluarga' in review
+    assert 'harus jelas menyebut petugas' in analyzer.CATEGORIES['BRIBERY_CORRUPTION']

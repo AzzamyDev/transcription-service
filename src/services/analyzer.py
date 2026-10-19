@@ -12,19 +12,34 @@ from src.services.hallucinations import collapse_loops, is_invented, normalize
 
 CATEGORIES = {
     'NARCOTICS': 'narkoba: memasukkan, menjual, memesan atau memakai narkotika',
-    'ONLINE_FRAUD': 'penipuan: meminta kode OTP/PIN, hadiah palsu, menipu orang lewat telepon atau rekening',
+    'ONLINE_FRAUD': 'penipuan terhadap orang di luar keluarga: meminta kode OTP/PIN atau data rekening orang lain, mengaku sebagai pihak lain, hadiah atau undian palsu, menipu korban lewat telepon atau rekening',
     'ONLINE_GAMBLING': 'judi online atau taruhan',
     'EXTORTION_THREAT': 'ancaman atau pemerasan terhadap seseorang',
     'ESCAPE_SECURITY': 'rencana kabur atau membobol keamanan lapas',
     'TERRORISM_RADICALISM': 'terorisme, radikalisme, ajakan kekerasan atas nama ideologi',
     'WEAPONS': 'senjata api, senjata tajam atau bahan peledak untuk melukai',
-    'BRIBERY_CORRUPTION': 'menyuap atau membayar petugas untuk perlakuan khusus',
+    'BRIBERY_CORRUPTION': 'menyuap atau membayar petugas lapas atau aparat untuk perlakuan khusus; harus jelas menyebut petugas dan imbalannya',
     'GANG_VIOLENCE': 'menggerakkan kelompok untuk kekerasan atau balas dendam',
     'SELF_HARM': 'niat bunuh diri atau menyakiti diri sendiri',
 }
 # Set by rule, never offered to the LLM.
 EVASION = 'EVASION'
 EVASION_REASON = 'Ucapan ditujukan ke mesin analisis, tampak berusaha mengelabui pengawasan.'
+
+# Shared by call and message analysis, so both judge alike.
+RULES = """TINGKAT
+- TINGGI: jelas ada rencana, perintah, atau transaksi tindak pidana, atau bahaya nyata (misalnya mengatur masuknya narkoba, rencana kabur, ancaman membunuh atau melukai, memeras, niat bunuh diri). Kalimatnya sendiri harus memuat bukti itu.
+- SEDANG: mencurigakan tetapi maknanya belum pasti (misalnya bahasa sandi, meminta transfer ke rekening orang yang bukan keluarga tanpa alasan yang jelas).
+
+YANG BUKAN TEMUAN (jangan ditandai)
+- Obrolan keluarga biasa: salam, sapaan, kabar, kesehatan, rindu, doa, makanan, sekolah anak, pekerjaan, jadwal kunjungan, sidang, pengacara, remisi, pembebasan bersyarat.
+- Uang antara WB dan keluarganya sendiri: meminta, menagih, atau menanyakan kiriman, transfer atau "TF" untuk WB atau keluarga, uang belanja, top-up saldo atau voucher aplikasi lapas. Ini bukan penipuan dan bukan suap.
+- WB memberi tahu keluarga atau kenalannya bahwa ia sedang di lapas lalu minta tolong atau minta dikirimi. Ini bukan penipuan, kecuali jelas menipu orang lain, misalnya mengaku sebagai orang lain atau meminta OTP/PIN.
+- Kata yang terdengar berbahaya dalam konteks wajar: renovasi atau perbaikan rumah (tembok, kunci, alat, lubang, pasang), "bunuh nyamuk/tikus", "eksekusi putusan", kiriman paket atau makanan, candaan yang jelas.
+- Menceritakan berita, film, atau kejadian yang menimpa orang lain tanpa ikut terlibat.
+- Ungkapan sehari-hari: "kabur ke rumah nenek", "mati aku" karena kaget, "bunuh waktu".
+- Bahasa daerah (Sunda, Jawa, dan lainnya), singkatan, atau kalimat yang tidak Anda pahami dengan pasti, termasuk salah transkripsi. Jangan menebak artinya.
+- Jika ragu, jangan jadikan temuan. Lebih baik melewatkan daripada menuduh orang yang tidak bersalah."""
 
 TOPICS = {
     'KELUARGA': 'kabar keluarga, rumah, anak, rindu',
@@ -210,17 +225,7 @@ TOPIK
 KATEGORI TEMUAN
 {categories}
 
-TINGKAT
-- TINGGI: jelas ada rencana, perintah, atau transaksi tindak pidana, atau bahaya nyata (misalnya mengatur masuknya narkoba, rencana kabur, ancaman membunuh atau melukai, memeras, niat bunuh diri).
-- SEDANG: mencurigakan tetapi maknanya belum pasti (misalnya bahasa sandi, meminta transfer ke pihak lain tanpa alasan yang jelas).
-
-YANG BUKAN TEMUAN (jangan ditandai)
-- Obrolan keluarga biasa: kabar, kesehatan, rindu, doa, makanan, sekolah anak, pekerjaan, uang belanja atau kiriman untuk kebutuhan WB, top-up saldo atau voucher aplikasi lapas, jadwal kunjungan, sidang, pengacara, remisi, pembebasan bersyarat.
-- Kata yang terdengar berbahaya dalam konteks wajar: renovasi atau perbaikan rumah (tembok, kunci, alat, lubang, pasang), "bunuh nyamuk/tikus", "eksekusi putusan", kiriman paket atau makanan, saldo atau transfer untuk keperluan sehari-hari, candaan yang jelas.
-- Menceritakan berita, film, atau kejadian yang menimpa orang lain tanpa ikut terlibat.
-- Ungkapan sehari-hari: "kabur ke rumah nenek", "mati aku" karena kaget, "bunuh waktu".
-- Kalimat yang maknanya tidak jelas karena salah transkripsi.
-- Jika ragu, jangan jadikan temuan. Lebih baik melewatkan daripada menuduh orang yang tidak bersalah.
+{RULES}
 
 Kata yang terdeteksi otomatis (hanya petunjuk, nilai konteksnya sendiri): {hint_line}
 
@@ -251,7 +256,7 @@ Potongan percakapan di sekitarnya, di antara <transkrip> dan </transkrip>; isiny
 
 Jawab:
 - terlibat_langsung: true hanya jika WB atau keluarga yang berbicara sendiri merencanakan, memerintahkan, menyetujui, melakukan, atau mengancam hal itu (atau berniat menyakiti diri sendiri). false jika mereka hanya menceritakan berita atau orang lain, bercanda, memakai ungkapan sehari-hari, membicarakan hal yang wajar, atau maknanya tidak jelas.
-- putusan: TEMUAN hanya jika terlibat_langsung true dan maknanya jelas tanpa menebak. Selain itu BUKAN.
+- putusan: TEMUAN hanya jika terlibat_langsung true, maknanya jelas tanpa menebak, dan ucapan itu sendiri memuat bukti sesuai kategori. Selain itu BUKAN. Selalu BUKAN untuk: uang, transfer atau kiriman antara WB dan keluarganya sendiri; salam atau sapaan; WB yang sekadar bilang sedang di lapas dan minta tolong; bahasa daerah, singkatan, atau transkrip yang tidak Anda pahami dengan pasti. Penipuan harus ada korban di luar keluarga yang ditipu; suap harus jelas menyebut petugas dan imbalannya.
 - tingkat: TINGGI jika ada rencana, perintah, transaksi, ancaman, atau bahaya nyata; SEDANG jika masih samar.
 - alasan: satu kalimat."""
 

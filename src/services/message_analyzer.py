@@ -17,6 +17,7 @@ from src.services.analyzer import (
     MAX_REVIEWS,
     QUOTE_CHARS,
     REVIEW_CONTEXT,
+    RULES,
     REVIEW_SCHEMA,
     SEVERITY,
     _TAMPER,
@@ -99,17 +100,7 @@ temuan: hanya pesan [BARU] yang secara wajar menunjukkan pelanggaran hukum atau 
 KATEGORI TEMUAN
 {categories}
 
-TINGKAT
-- TINGGI: jelas ada rencana, perintah, atau transaksi tindak pidana, atau bahaya nyata (misalnya mengatur masuknya narkoba, rencana kabur, ancaman membunuh atau melukai, memeras, niat bunuh diri).
-- SEDANG: mencurigakan tetapi maknanya belum pasti (misalnya bahasa sandi, meminta transfer ke pihak lain tanpa alasan yang jelas).
-
-YANG BUKAN TEMUAN (jangan ditandai)
-- Obrolan keluarga biasa: kabar, kesehatan, rindu, doa, salam, makanan, sekolah anak, pekerjaan, uang belanja atau kiriman untuk kebutuhan WB, top-up saldo atau voucher aplikasi lapas, titipan barang lewat kunjungan resmi, jadwal kunjungan, sidang, pengacara, remisi, pembebasan bersyarat.
-- Kata yang terdengar berbahaya dalam konteks wajar: renovasi atau perbaikan rumah (tembok, kunci, alat, lubang, pasang), "bunuh nyamuk/tikus", "eksekusi putusan", kiriman paket atau makanan, saldo atau transfer untuk keperluan sehari-hari, candaan yang jelas.
-- Menceritakan berita, film, atau kejadian yang menimpa orang lain tanpa ikut terlibat.
-- Ungkapan sehari-hari: "kabur ke rumah nenek", "mati aku" karena kaget, "bunuh waktu".
-- Pesan yang maknanya tidak jelas, singkatan yang tidak bisa dipastikan, atau salah transkripsi.
-- Jika ragu, jangan jadikan temuan. Lebih baik melewatkan daripada menuduh orang yang tidak bersalah.
+{RULES}
 
 Kata yang terdeteksi otomatis (hanya petunjuk, nilai konteksnya sendiri): {hint_line}
 
