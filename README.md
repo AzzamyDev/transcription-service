@@ -39,7 +39,7 @@ Keep replicas × `WHISPER_CPU_THREADS` within the machine's cores. Jobs live in 
 
 ## API
 
-Interactive docs at `/docs`. When `API_KEY` is set, send it as `X-Api-Key` (`/ping`, `/health` and `/docs` stay open).
+Integrating a client? See [docs/INTEGRATION.md](docs/INTEGRATION.md) (flow, retries, replicas, code examples in Indonesian). Interactive docs at `/docs`. When `API_KEY` is set, send it as `X-Api-Key` (`/ping`, `/health` and `/docs` stay open).
 
 ### `POST /jobs` (multipart)
 
