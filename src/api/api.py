@@ -1,57 +1,52 @@
 """
-REST API for Audio Transcription Service - PRODUCTION VERSION
-Pure in-memory processing with preloaded pipeline
+REST API of the speech-to-text service. Requests are queued and processed by
+one worker thread (the model is not thread-safe); scale out with replicas.
 """
-from flask import Flask, request, jsonify
-from flask_swagger_ui import get_swaggerui_blueprint
-from flask_cors import CORS
+import hmac
+import json
 import os
-import time
-from pathlib import Path
-from io import BytesIO
+import re
 import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from flask_swagger_ui import get_swaggerui_blueprint
 
 from src.core.config import Config
-from src.core.exceptions import *
 from src.services.jobs import JobQueue, QueueFullError
 
-
-# Initialize Flask app
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = Config.MAX_AUDIO_SIZE_MB * 1024 * 1024
-
-# Enable CORS
 CORS(app)
 
-# Swagger UI setup
 SWAGGER_URL = '/docs'
 API_URL = '/api/swagger.json'
-
-swaggerui_blueprint = get_swaggerui_blueprint(
-    SWAGGER_URL,
-    API_URL,
-    config={
-        'app_name': "SIMTELPAS AI - Audio Transcription API",
-        'defaultModelsExpandDepth': -1,
-        'docExpansion': 'none'
-    }
+app.register_blueprint(
+    get_swaggerui_blueprint(
+        SWAGGER_URL, API_URL,
+        config={'app_name': 'Speech-to-text API', 'defaultModelsExpandDepth': -1, 'docExpansion': 'none'},
+    ),
+    url_prefix=SWAGGER_URL,
 )
+SWAGGER_SPEC = Path(__file__).with_name('swagger.json')
 
-app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL)
+# Probes and docs stay open when API_KEY is set.
+OPEN_PATHS = ('/ping', '/health', API_URL)
 
-# ============================================================================
-# PIPELINE INITIALIZATION
-# ============================================================================
-# Pipeline will be injected by wsgi.py (production) or initialized by run.py (dev)
-# DO NOT create pipeline here - it will be set externally
+# Set by init(): wsgi.py leaves them empty until the model is loaded in the
+# worker, run.py loads it before serving.
 pipeline = None
 jobs = None
 # Leaves request threads free for /ping, /health and /jobs.
 sync_waiters = threading.BoundedSemaphore(Config.SYNC_MAX_WAITERS)
+LANGUAGE_CODE = re.compile(r'^[a-z]{2,3}$')
 
 
 def init(loaded_pipeline):
-    """Attach the loaded pipeline and start the job workers"""
+    """Attach the loaded pipeline and start the job worker"""
     global pipeline, jobs
     pipeline = loaded_pipeline
     jobs = JobQueue(
@@ -62,82 +57,8 @@ def init(loaded_pipeline):
 
 
 def _run_job(payload):
-    """Runs on a job worker thread: the only place the GPU is used"""
-    pipe = get_pipeline()
-    if payload['kind'] in ('analysis', 'message_analysis'):
-        analyzer = pipe.analyzer if payload['kind'] == 'analysis' else pipe.message_analyzer
-        result = analyzer.analyze(payload['items'], payload['hints'])
-        # A failed job is not kept under its key, so a resend is read again.
-        if result['status'] in ('unavailable', 'failed'):
-            raise AnalysisNotDone(result['status'])
-        return result
-    if payload['kind'] == 'tracks':
-        result = pipe.process_tracks(
-            payload['tracks'], include_summary=payload['include_summary']
-        )
-    else:
-        result = pipe.process(
-            BytesIO(payload['audio']),
-            num_speakers=payload['num_speakers'],
-            min_speakers=payload['min_speakers'],
-            max_speakers=payload['max_speakers'],
-            include_summary=payload['include_summary'],
-        )
-    return _format_result(result)
-
-
-class AnalysisNotDone(Exception):
-    """The LLM could not read the transcript: 'unavailable' or 'failed'."""
-
-
-def _format_result(result):
-    """The response data shared by /transcribe and finished jobs"""
-    format_start = time.time()
-    transcript_lines = []
-    current_speaker = None
-    for seg in result['segments']:
-        if seg['speaker'] == current_speaker and transcript_lines:
-            transcript_lines[-1] += f" {seg['text']}"
-        else:
-            transcript_lines.append(f"{seg['speaker']}: {seg['text']}")
-            current_speaker = seg['speaker']
-
-    return {
-        'transcript': "\n".join(transcript_lines),
-        'summary': result['summary'],
-        'summary_status': result.get('summary_status'),
-        'sentiment': result['sentiment'],
-        'flagged_phrases': result['flagged_phrases'],
-        'segments': result['segments'],
-        'audio_info': {
-            'duration_seconds': result['audio_info']['duration_seconds'],
-            'duration_minutes': result['audio_info']['duration_minutes'],
-            'sample_rate': result['audio_info']['sample_rate']
-        },
-        'statistics': {
-            'total_duration': result['statistics']['total_duration'],
-            'total_words': result['statistics']['total_words'],
-            'num_speakers': result['statistics']['num_speakers'],
-            'speakers': {
-                speaker: {
-                    'duration': round(data['duration'], 2),
-                    'duration_minutes': round(data['duration'] / 60, 2),
-                    'words': data['words'],
-                    'turns': data['turns']
-                }
-                for speaker, data in result['statistics']['speakers'].items()
-            }
-        },
-        'timings': {
-            'validation': round(result['timings'].get('validation', 0), 2),
-            'preparation': round(result['timings'].get('preparation', 0), 2),
-            'diarization': round(result['timings'].get('diarization', 0), 2),
-            'transcription': round(result['timings'].get('transcription', 0), 2),
-            'summarization': round(result['timings'].get('summarization', 0), 2),
-            'formatting': round(time.time() - format_start, 2),
-            'processing_total': round(result['timings'].get('total', 0), 2),
-        }
-    }
+    """Runs on the job worker thread: the only place the model is used"""
+    return pipeline.process(payload['tracks'], language=payload['language'])
 
 
 def _job_view(job):
@@ -161,375 +82,100 @@ def _error(message, status):
     return jsonify({'success': False, 'message': message, 'data': None}), status
 
 
-def get_pipeline():
+@app.before_request
+def check_api_key():
+    if not Config.API_KEY or request.path in OPEN_PATHS \
+            or request.path.startswith(SWAGGER_URL):
+        return None
+    sent = request.headers.get('X-Api-Key', '')
+    if not hmac.compare_digest(sent.encode(), Config.API_KEY.encode()):
+        return _error('Missing or wrong X-Api-Key', 401)
+    return None
+
+
+def _read_audio_request():
     """
-    Get pipeline instance
-
-    Pipeline must be initialized externally:
-    - In production: wsgi.py injects preloaded pipeline
-    - In development: run.py initializes and injects pipeline
-
-    Returns:
-        AudioTranscriptionPipeline instance
-
-    Raises:
-        RuntimeError: If pipeline not initialized
+    The payload of a transcription request, or an error response. Either
+    several `tracks` with matching `labels` and `offsets` (seconds from the
+    start of the common timeline), or one `file` with an optional `label`.
+    `language` overrides the default for this request.
     """
-    global pipeline
-    if pipeline is None:
-        raise RuntimeError(
-            "Pipeline not initialized! "
-            "Run via 'gunicorn wsgi:app' (production) or 'python run.py' (development)"
-        )
-    return pipeline
+    language = request.form.get('language') or None
+    if language and not LANGUAGE_CODE.match(language):
+        return None, _error('language must be a code such as id or en', 400)
+
+    tracks = request.files.getlist('tracks')
+    if tracks:
+        labels = request.form.getlist('labels')
+        offsets = request.form.getlist('offsets', type=float)
+        if len(labels) != len(tracks) or len(offsets) != len(tracks):
+            return None, _error('Every track needs a label and an offset', 400)
+        if any(not label for label in labels) or any(o < 0 for o in offsets):
+            return None, _error('Labels must be set and offsets not negative', 400)
+        entries = [(labels[i], offsets[i], tracks[i]) for i in range(len(tracks))]
+    else:
+        file = request.files.get('file')
+        if file is None or file.filename == '':
+            return None, _error('No file provided', 400)
+        entries = [(request.form.get('label') or None, 0.0, file)]
+
+    audio = [(label, offset, upload.read()) for label, offset, upload in entries]
+    if any(len(data) == 0 for _, _, data in audio):
+        return None, _error('Empty audio file', 400)
+    return {
+        'language': language,
+        'tracks': [{'label': label, 'offset': offset, 'audio': data} for label, offset, data in audio],
+    }, None
 
 
 # ============================================================================
-# API ENDPOINTS
+# ENDPOINTS
 # ============================================================================
 
-@app.route('/api/swagger.json')
+@app.route(API_URL)
 def swagger_spec():
-    """Serve Swagger specification - embedded"""
-    spec = {
-        "openapi": "3.0.0",
-        "info": {
-            "title": "SIMTELPAS AI - Audio Transcription API",
-            "description": "API untuk transcribe audio dengan speaker diarization, AI summary, dan detailed timing info. Pure in-memory processing tanpa file saving.",
-            "version": "2.0.0",
-            "contact": {
-                "name": "SIMTELPAS AI"
-            }
-        },
-        "servers": [
-            {
-                "url": "/",
-                "description": "Current server"
-            }
-        ],
-        "paths": {
-            "/health": {
-                "get": {
-                    "summary": "Health Check",
-                    "description": "Check API status dan dependencies",
-                    "tags": ["System"],
-                    "responses": {
-                        "200": {
-                            "description": "Service is healthy",
-                            "content": {
-                                "application/json": {
-                                    "schema": {
-                                        "type": "object",
-                                        "properties": {
-                                            "status": {"type": "string", "example": "healthy"},
-                                            "service": {"type": "string", "example": "SIMTELPAS AI"},
-                                            "version": {"type": "string", "example": "2.0.0"},
-                                            "timestamp": {"type": "string", "format": "date-time"},
-                                            "dependencies": {
-                                                "type": "object",
-                                                "properties": {
-                                                    "whisper": {"type": "string", "example": "loaded"},
-                                                    "diarizer": {"type": "string", "example": "loaded"},
-                                                    "gpu": {"type": "string", "example": "available"}
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            "/transcribe": {
-                "post": {
-                    "summary": "Transcribe Audio",
-                    "description": "Upload audio file untuk di-transcribe dengan speaker diarization dan AI summary. Pure in-memory processing dengan detailed timing info.",
-                    "tags": ["Transcription"],
-                    "requestBody": {
-                        "required": True,
-                        "content": {
-                            "multipart/form-data": {
-                                "schema": {
-                                    "type": "object",
-                                    "required": ["file"],
-                                    "properties": {
-                                        "file": {
-                                            "type": "string",
-                                            "format": "binary",
-                                            "description": "Audio file (mp3, wav, m4a, flac, ogg, opus, webm)"
-                                        },
-                                        "num_speakers": {
-                                            "type": "integer",
-                                            "description": "Exact number of speakers (optional)",
-                                            "example": 2
-                                        },
-                                        "include_summary": {
-                                            "type": "boolean",
-                                            "description": "Generate AI summary (default: true)",
-                                            "default": True,
-                                            "example": True
-                                        },
-                                        "detailed_segments": {
-                                            "type": "boolean",
-                                            "description": "Include detailed segments array (default: false)",
-                                            "default": False,
-                                            "example": False
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    "responses": {
-                        "200": {
-                            "description": "Transcription successful",
-                            "content": {
-                                "application/json": {
-                                    "schema": {
-                                        "type": "object",
-                                        "properties": {
-                                            "success": {"type": "boolean", "example": True},
-                                            "message": {"type": "string", "example": "Transcription completed successfully"},
-                                            "data": {
-                                                "type": "object",
-                                                "properties": {
-                                                    "transcript": {
-                                                        "type": "string",
-                                                        "example": "SPEAKER_1: Hello\nSPEAKER_2: Hi there"
-                                                    },
-                                                    "summary": {
-                                                        "type": "string",
-                                                        "example": "Brief conversation summary..."
-                                                    },
-                                                    "sentiment": {
-                                                        "type": "string",
-                                                        "enum": ["POSITIVE", "NEGATIVE", "NEUTRAL"],
-                                                        "example": "NEUTRAL",
-                                                        "description": "Sentiment dari summary: POSITIVE | NEGATIVE | NEUTRAL"
-                                                    },
-                                                    "flagged_phrases": {
-                                                        "type": "array",
-                                                        "items": {"type": "string"},
-                                                        "example": ["SPEAKER_1: transfer rekening ke nomor ini"],
-                                                        "description": "Frasa mencurigakan dari transcript (maks 10, prioritas keyword TINGGI)"
-                                                    },
-                                                    "timings": {
-                                                        "type": "object",
-                                                        "properties": {
-                                                            "upload": {"type": "number", "example": 0.45},
-                                                            "validation": {"type": "number", "example": 0.12},
-                                                            "preparation": {"type": "number", "example": 0.18},
-                                                            "diarization": {"type": "number", "example": 12.34},
-                                                            "transcription": {"type": "number", "example": 8.67},
-                                                            "summarization": {"type": "number", "example": 2.15},
-                                                            "formatting": {"type": "number", "example": 0.03},
-                                                            "processing_total": {"type": "number", "example": 23.49},
-                                                            "request_total": {"type": "number", "example": 23.97}
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        },
-                        "400": {
-                            "description": "Bad request"
-                        },
-                        "413": {
-                            "description": "File too large"
-                        },
-                        "500": {
-                            "description": "Internal server error"
-                        }
-                    }
-                }
-            }
-        }
-    }
-    return jsonify(spec)
+    return jsonify(json.loads(SWAGGER_SPEC.read_text()))
 
 
 @app.route('/ping', methods=['GET'])
 def ping():
-    """Lightweight liveness probe — never blocked by inference"""
+    """Liveness probe, never blocked by transcription"""
     return jsonify({'status': 'ok'}), 200
 
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check endpoint"""
-    import torch
-    from datetime import datetime
-
-    try:
-        # Check if pipeline is initialized
-        pipe = get_pipeline()
-
-        health_data = {
-            'status': 'healthy',
-            'service': 'SIMTELPAS AI - Audio Transcription',
-            'version': '2.0.0',
-            'timestamp': datetime.utcnow().isoformat() + 'Z',
-            'dependencies': {
-                'pipeline': 'loaded',
-                'whisper': 'loaded',
-                'diarizer': 'loaded',
-                'gpu': 'available' if torch.cuda.is_available() else 'unavailable',
-                'summarizer': (
-                    pipe.summarizer.last_known_status() if pipe.summarizer
-                    else 'disabled'
-                ),
-            },
-            'jobs': jobs.stats() if jobs else None
-        }
-
-        return jsonify(health_data), 200
-
-    except Exception as e:
-        return jsonify({
-            'status': 'unhealthy',
-            'service': 'SIMTELPAS AI - Audio Transcription',
-            'version': '2.0.0',
-            'timestamp': datetime.utcnow().isoformat() + 'Z',
-            'error': str(e)
-        }), 500
+    """Ready once the model is loaded"""
+    body = {
+        'service': 'speech-to-text',
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+    }
+    if pipeline is None:
+        return jsonify({**body, 'status': 'loading'}), 503
+    return jsonify({
+        **body,
+        'status': 'healthy',
+        'model': pipeline.transcriber.model_size,
+        'compute_type': Config.WHISPER_COMPUTE_TYPE,
+        'cpu_threads': Config.WHISPER_CPU_THREADS,
+        'language': Config.LANGUAGE,
+        'jobs': jobs.stats(),
+    }), 200
 
 
 @app.route('/jobs', methods=['POST'])
 def create_job():
     """
-    Queue a transcription and answer at once (202). Either several
-    `tracks` (one per speaker) with matching `labels`, `names` and `offsets`
-    (seconds from the call start), or one mixed `file` that is diarized.
-    `job_key` makes a resend return the job already queued for it.
+    Queue a transcription and answer at once (202). `job_key` makes a resend
+    return the job already queued, running or done for it.
     """
-    include_summary = request.form.get('include_summary', 'true').lower() == 'true'
-    key = request.form.get('job_key') or None
-    tracks = request.files.getlist('tracks')
-
-    if tracks:
-        labels = request.form.getlist('labels')
-        names = request.form.getlist('names')
-        offsets = request.form.getlist('offsets', type=float)
-        if len(labels) != len(tracks) or len(offsets) != len(tracks):
-            return _error('Every track needs a label and an offset', 400)
-        if names and len(names) != len(tracks):
-            return _error('Names must match the tracks', 400)
-        if any(not label for label in labels) or any(o < 0 for o in offsets):
-            return _error('Labels must be set and offsets not negative', 400)
-        audios = [track.read() for track in tracks]
-        if any(len(audio) == 0 for audio in audios):
-            return _error('Empty track', 400)
-        payload = {
-            'kind': 'tracks',
-            'include_summary': include_summary,
-            'tracks': [
-                {
-                    'label': labels[i],
-                    'name': names[i] if names else labels[i],
-                    'offset': offsets[i],
-                    'audio': audios[i],
-                }
-                for i in range(len(tracks))
-            ],
-        }
-    else:
-        file = request.files.get('file')
-        if file is None or file.filename == '':
-            return _error('No file provided', 400)
-        audio = file.read()
-        if len(audio) == 0:
-            return _error('Empty file', 400)
-        payload = {
-            'kind': 'mixed',
-            'include_summary': include_summary,
-            'audio': audio,
-            'num_speakers': request.form.get('num_speakers', type=int),
-            'min_speakers': request.form.get('min_speakers', type=int),
-            'max_speakers': request.form.get('max_speakers', type=int),
-        }
-
+    if pipeline is None:
+        return _error('Model is still loading', 503)
+    payload, error = _read_audio_request()
+    if error:
+        return error
     try:
-        job = jobs.submit(payload, key)
-    except QueueFullError as e:
-        return _error(f'Queue full: {e}', 503)
-    return jsonify({'success': True, 'message': 'Queued', 'data': _job_view(job)}), 202
-
-
-MAX_ANALYSIS_SEGMENTS = 5000
-
-
-@app.route('/analyses', methods=['POST'])
-def create_analysis():
-    """
-    Queue the analysis of a transcript already made (summary and findings
-    for supervision). Body: {job_key, segments: [{speaker, start, end,
-    text}], hints: [keyword]}. Polled through /jobs/<id> like a
-    transcription, and run by the same worker so the GPU does one thing at
-    a time.
-    """
-    body = request.get_json(silent=True) or {}
-    hints = body.get('hints') or []
-    if not isinstance(hints, list) or len(hints) > 200 \
-            or not all(isinstance(h, str) and len(h) <= 100 for h in hints):
-        return _error('hints must be at most 200 short strings', 400)
-    if body.get('mode') == 'messages':
-        return _queue_message_analysis(body, hints)
-    segments = body.get('segments')
-    if not isinstance(segments, list) or len(segments) > MAX_ANALYSIS_SEGMENTS:
-        return _error(f'segments must be a list of at most {MAX_ANALYSIS_SEGMENTS}', 400)
-    clean = []
-    for seg in segments:
-        try:
-            start, end = float(seg['start']), float(seg['end'])
-            speaker, text = str(seg['speaker'])[:100], str(seg['text'])[:4000]
-        except (KeyError, TypeError, ValueError):
-            return _error('Every segment needs speaker, start, end and text', 400)
-        if start < 0 or end < start:
-            return _error('Segment times are invalid', 400)
-        clean.append({'speaker': speaker, 'start': start, 'end': end, 'text': text})
-    try:
-        job = jobs.submit(
-            {'kind': 'analysis', 'items': clean, 'hints': hints},
-            body.get('job_key') or None,
-        )
-    except QueueFullError as e:
-        return _error(f'Queue full: {e}', 503)
-    return jsonify({'success': True, 'message': 'Queued', 'data': _job_view(job)}), 202
-
-
-MAX_ANALYSIS_MESSAGES = 300
-
-
-def _queue_message_analysis(body, hints):
-    """
-    A conversation of messages: {mode: 'messages', job_key, hints, messages:
-    [{id, speaker, at, text, new, voice}]}; only `new` ones can be findings.
-    """
-    messages = body.get('messages')
-    if not isinstance(messages, list) or len(messages) > MAX_ANALYSIS_MESSAGES:
-        return _error(f'messages must be a list of at most {MAX_ANALYSIS_MESSAGES}', 400)
-    clean = []
-    for msg in messages:
-        if not isinstance(msg, dict) or not isinstance(msg.get('id'), str) \
-                or not msg['id'] or len(msg['id']) > 64:
-            return _error('Every message needs an id', 400)
-        clean.append({
-            'id': msg['id'],
-            'speaker': str(msg.get('speaker', ''))[:100],
-            'at': str(msg.get('at', ''))[:32],
-            'text': str(msg.get('text') or '')[:4000],
-            'new': msg.get('new') is True,
-            'voice': msg.get('voice') is True,
-        })
-    try:
-        job = jobs.submit(
-            {'kind': 'message_analysis', 'items': clean, 'hints': hints},
-            body.get('job_key') or None,
-        )
+        job = jobs.submit(payload, request.form.get('job_key') or None)
     except QueueFullError as e:
         return _error(f'Queue full: {e}', 503)
     return jsonify({'success': True, 'message': 'Queued', 'data': _job_view(job)}), 202
@@ -537,7 +183,7 @@ def _queue_message_analysis(body, hints):
 
 @app.route('/jobs/<job_id>', methods=['GET'])
 def get_job(job_id):
-    job = jobs.get(job_id)
+    job = jobs.get(job_id) if jobs else None
     if job is None:
         return _error('Job not found', 404)
     return jsonify({'success': True, 'message': job.status, 'data': _job_view(job)}), 200
@@ -546,34 +192,26 @@ def get_job(job_id):
 @app.route('/transcribe', methods=['POST'])
 def transcribe():
     """
-    Synchronous transcription, kept for older clients. It goes through the
-    job queue too, so the GPU still runs one job at a time.
+    Transcription that answers when done. It goes through the job queue too,
+    so the model still runs one job at a time; long audio belongs in /jobs.
     """
-    request_start = time.time()
-    file = request.files.get('file')
-    if file is None or file.filename == '':
-        return _error('No file provided', 400)
-    audio = file.read()
-    if len(audio) == 0:
-        return _error('Empty file', 400)
+    if pipeline is None:
+        return _error('Model is still loading', 503)
+    started = time.time()
+    payload, error = _read_audio_request()
+    if error:
+        return error
     if not sync_waiters.acquire(blocking=False):
         return _error('Too many waiting requests; use POST /jobs', 503)
     try:
-        return _transcribe_and_wait(audio, request_start)
+        return _transcribe_and_wait(payload, started)
     finally:
         sync_waiters.release()
 
 
-def _transcribe_and_wait(audio, request_start):
+def _transcribe_and_wait(payload, started):
     try:
-        job = jobs.submit({
-            'kind': 'mixed',
-            'include_summary': request.form.get('include_summary', 'true').lower() == 'true',
-            'audio': audio,
-            'num_speakers': request.form.get('num_speakers', type=int),
-            'min_speakers': None,
-            'max_speakers': None,
-        })
+        job = jobs.submit(payload)
     except QueueFullError as e:
         return _error(f'Queue full: {e}', 503)
 
@@ -581,79 +219,32 @@ def _transcribe_and_wait(audio, request_start):
     while job.status in ('queued', 'processing'):
         if time.time() > deadline:
             return _error(f'Still processing; poll GET /jobs/{job.id}', 504)
-        time.sleep(1)
+        time.sleep(0.5)
     if job.status == 'failed':
         return _error(f'Transcription failed: {job.error}', 500)
 
     data = dict(job.result)
-    if request.form.get('detailed_segments', 'false').lower() != 'true':
-        data.pop('segments', None)
-    data['timings'] = {**data['timings'], 'request_total': round(time.time() - request_start, 2)}
-    return jsonify({
-        'success': True,
-        'message': 'Transcription completed successfully',
-        'data': data
-    }), 200
+    data['timings'] = {**data['timings'], 'request_total': round(time.time() - started, 2)}
+    return jsonify({'success': True, 'message': 'Transcription completed', 'data': data}), 200
 
 
 @app.errorhandler(413)
 def too_large(e):
-    """Handle file too large error"""
-    return jsonify({
-        'success': False,
-        'message': f'File too large. Maximum size: {Config.MAX_AUDIO_SIZE_MB}MB',
-        'data': None
-    }), 413
+    return _error(f'File too large. Maximum size: {Config.MAX_AUDIO_SIZE_MB}MB', 413)
 
 
 @app.errorhandler(500)
 def internal_error(e):
-    """Handle internal server error"""
-    return jsonify({
-        'success': False,
-        'message': 'Internal server error',
-        'data': None
-    }), 500
+    return _error('Internal server error', 500)
 
 
 def main():
-    """
-    Run Flask development server
-    This is used by run.py for local development
-    """
-    # Validate configuration
-    is_valid, errors = Config.validate()
-    if not is_valid:
-        print("Configuration errors:")
-        for error in errors:
-            print(f"  - {error}")
-        return
-
-    # Run server
+    """Flask development server, used by run.py"""
     host = os.getenv('API_HOST', '0.0.0.0')
     port = int(os.getenv('API_PORT', 8000))
     debug = os.getenv('API_DEBUG', 'false').lower() == 'true'
-
-    print("=" * 80)
-    print("SIMTELPAS AI - Audio Transcription Service")
-    print("=" * 80)
-    print(f"Model: {Config.WHISPER_MODEL}")
-    print(f"Language: {Config.LANGUAGE}")
-    print(f"Max file size: {Config.MAX_AUDIO_SIZE_MB}MB")
-    print("=" * 80)
-    print(f"Host: {host}")
-    print(f"Port: {port}")
-    print("=" * 80)
-    print(f"\n📖 Swagger UI: http://{host if host != '0.0.0.0' else '127.0.0.1'}:{port}/docs")
-    print(f"❤️  Health Check: http://{host if host != '0.0.0.0' else '127.0.0.1'}:{port}/health")
-    print(f"🎤 Transcribe: POST http://{host if host != '0.0.0.0' else '127.0.0.1'}:{port}/transcribe")
-    print("=" * 80)
-
-    app.run(
-        host=host,
-        port=port,
-        debug=debug
-    )
+    print(f"Swagger UI: http://127.0.0.1:{port}/docs", flush=True)
+    app.run(host=host, port=port, debug=debug)
 
 
 if __name__ == '__main__':

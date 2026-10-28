@@ -1,423 +1,96 @@
 {
   "openapi": "3.0.0",
   "info": {
-    "title": "SIMTELPAS AI - Audio Transcription API",
-    "description": "API untuk transcribe audio dengan speaker diarization, AI summary, dan detailed timing info. Pure in-memory processing tanpa file saving.",
-    "version": "2.0.0",
-    "contact": {
-      "name": "SIMTELPAS AI"
+    "title": "Speech-to-text API",
+    "description": "Transcribes audio with faster-whisper on the CPU. Work is queued and run one job at a time per process; scale out with replicas. When the service sets API_KEY, send it as the X-Api-Key header (/ping, /health and /docs stay open). Audio is processed in memory and never stored.",
+    "version": "3.0.0"
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiKey": {"type": "apiKey", "in": "header", "name": "X-Api-Key"}
+    },
+    "schemas": {
+      "Segment": {
+        "type": "object",
+        "properties": {
+          "speaker": {"type": "string", "nullable": true, "description": "The track's label; null for an unlabelled file"},
+          "start": {"type": "number", "description": "Seconds on the common timeline"},
+          "end": {"type": "number"},
+          "duration": {"type": "number"},
+          "text": {"type": "string"},
+          "confidence": {"type": "number", "description": "0-1, from Whisper's word probabilities"}
+        }
+      },
+      "Result": {
+        "type": "object",
+        "properties": {
+          "transcript": {"type": "string", "description": "One line per turn: \"LABEL: text\", or only the text without labels"},
+          "segments": {"type": "array", "items": {"$ref": "#/components/schemas/Segment"}},
+          "language": {"type": "string", "nullable": true},
+          "audio_info": {"type": "object", "properties": {"duration_seconds": {"type": "number"}, "sample_rate": {"type": "integer"}}},
+          "statistics": {"type": "object", "properties": {"total_words": {"type": "integer"}, "speech_seconds": {"type": "number"}, "speakers": {"type": "object"}}},
+          "timings": {"type": "object", "properties": {"decoding": {"type": "number"}, "transcription": {"type": "number"}, "total": {"type": "number"}}}
+        }
+      },
+      "Job": {
+        "type": "object",
+        "properties": {
+          "job_id": {"type": "string"},
+          "job_key": {"type": "string", "nullable": true},
+          "status": {"type": "string", "enum": ["queued", "processing", "done", "failed"]},
+          "position": {"type": "integer", "description": "Jobs ahead of a queued one"},
+          "created_at": {"type": "number"},
+          "started_at": {"type": "number", "nullable": true},
+          "finished_at": {"type": "number", "nullable": true},
+          "result": {"$ref": "#/components/schemas/Result"},
+          "error": {"type": "string"}
+        }
+      },
+      "AudioForm": {
+        "type": "object",
+        "properties": {
+          "file": {"type": "string", "format": "binary", "description": "One recording. Use this or tracks."},
+          "label": {"type": "string", "description": "Speaker label for file; omit for plain text"},
+          "tracks": {"type": "array", "items": {"type": "string", "format": "binary"}, "description": "One recording per speaker"},
+          "labels": {"type": "array", "items": {"type": "string"}, "description": "One per track"},
+          "offsets": {"type": "array", "items": {"type": "number"}, "description": "Seconds from the start of the timeline at which each track starts"},
+          "language": {"type": "string", "description": "Language code such as id or en; defaults to the service's WHISPER_LANGUAGE"}
+        }
+      }
     }
   },
-  "servers": [
-    {
-      "url": "http://localhost:5000",
-      "description": "Local development server"
-    }
-  ],
+  "security": [{"ApiKey": []}],
   "paths": {
-    "/health": {
-      "get": {
-        "summary": "Health Check",
-        "description": "Check API status dan dependencies",
-        "tags": ["System"],
+    "/ping": {"get": {"summary": "Liveness", "security": [], "responses": {"200": {"description": "Alive"}}}},
+    "/health": {"get": {"summary": "Ready once the model is loaded", "security": [], "responses": {"200": {"description": "Healthy"}, "503": {"description": "Model still loading"}}}},
+    "/jobs": {
+      "post": {
+        "summary": "Queue a transcription",
+        "description": "Answers at once. Sending the same job_key again returns the job already queued, running or done for it.",
+        "requestBody": {"content": {"multipart/form-data": {"schema": {"allOf": [{"$ref": "#/components/schemas/AudioForm"}, {"type": "object", "properties": {"job_key": {"type": "string"}}}]}}}},
         "responses": {
-          "200": {
-            "description": "Service is healthy",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "status": {
-                      "type": "string",
-                      "example": "healthy"
-                    },
-                    "service": {
-                      "type": "string",
-                      "example": "SIMTELPAS AI"
-                    },
-                    "version": {
-                      "type": "string",
-                      "example": "2.0.0"
-                    },
-                    "timestamp": {
-                      "type": "string",
-                      "format": "date-time"
-                    },
-                    "dependencies": {
-                      "type": "object",
-                      "properties": {
-                        "whisper": {
-                          "type": "string",
-                          "example": "loaded"
-                        },
-                        "diarizer": {
-                          "type": "string",
-                          "example": "loaded"
-                        },
-                        "gpu": {
-                          "type": "string",
-                          "example": "available"
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
+          "202": {"description": "Queued", "content": {"application/json": {"schema": {"type": "object", "properties": {"success": {"type": "boolean"}, "data": {"$ref": "#/components/schemas/Job"}}}}}},
+          "400": {"description": "Invalid request"},
+          "401": {"description": "Missing or wrong X-Api-Key"},
+          "503": {"description": "Queue full or model loading"}
         }
+      }
+    },
+    "/jobs/{id}": {
+      "get": {
+        "summary": "Job status and result",
+        "description": "Finished jobs are kept for 24 hours and are lost when the service restarts; a 404 means resubmit.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {"200": {"description": "The job", "content": {"application/json": {"schema": {"type": "object", "properties": {"success": {"type": "boolean"}, "data": {"$ref": "#/components/schemas/Job"}}}}}}, "404": {"description": "Unknown job"}}
       }
     },
     "/transcribe": {
       "post": {
-        "summary": "Transcribe Audio",
-        "description": "Upload audio file untuk di-transcribe dengan speaker diarization dan AI summary. Pure in-memory processing dengan detailed timing info.",
-        "tags": ["Transcription"],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "multipart/form-data": {
-              "schema": {
-                "type": "object",
-                "required": ["file"],
-                "properties": {
-                  "file": {
-                    "type": "string",
-                    "format": "binary",
-                    "description": "Audio file (mp3, wav, m4a, flac, ogg, opus, webm)"
-                  },
-                  "num_speakers": {
-                    "type": "integer",
-                    "description": "Exact number of speakers (optional, auto-detect if not specified)",
-                    "example": 2
-                  },
-                  "include_summary": {
-                    "type": "boolean",
-                    "description": "Generate AI summary (default: true)",
-                    "default": true,
-                    "example": true
-                  },
-                  "detailed_segments": {
-                    "type": "boolean",
-                    "description": "Include detailed segments array in response (default: false)",
-                    "default": false,
-                    "example": false
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Transcription successful",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "success": {
-                      "type": "boolean",
-                      "example": true
-                    },
-                    "message": {
-                      "type": "string",
-                      "example": "Transcription completed successfully"
-                    },
-                    "data": {
-                      "type": "object",
-                      "properties": {
-                        "transcript": {
-                          "type": "string",
-                          "description": "Formatted transcript with speaker labels",
-                          "example": "SPEAKER_1: Hello everyone\nSPEAKER_2: Hi, how are you?\nSPEAKER_1: I'm good, thanks"
-                        },
-                        "summary": {
-                          "type": "string",
-                          "description": "Concise AI-generated summary (5-7 sentences)",
-                          "example": "Topik: Greeting conversation\n\nPoin utama:\n- Speaker 1 membuka percakapan\n- Speaker 2 merespon dengan baik\n- Diskusi santai dan informal\n\nKesimpulan: Percakapan singkat antara dua orang."
-                        },
-                        "audio_info": {
-                          "type": "object",
-                          "properties": {
-                            "duration_seconds": {
-                              "type": "number",
-                              "example": 125.5
-                            },
-                            "duration_minutes": {
-                              "type": "number",
-                              "example": 2.09
-                            },
-                            "sample_rate": {
-                              "type": "integer",
-                              "example": 16000
-                            }
-                          }
-                        },
-                        "statistics": {
-                          "type": "object",
-                          "properties": {
-                            "total_duration": {
-                              "type": "number",
-                              "description": "Total audio duration in seconds",
-                              "example": 125.5
-                            },
-                            "total_words": {
-                              "type": "integer",
-                              "example": 285
-                            },
-                            "num_speakers": {
-                              "type": "integer",
-                              "example": 2
-                            },
-                            "speakers": {
-                              "type": "object",
-                              "description": "Per-speaker statistics",
-                              "additionalProperties": {
-                                "type": "object",
-                                "properties": {
-                                  "duration": {
-                                    "type": "number",
-                                    "description": "Speaker talk time in seconds",
-                                    "example": 75.3
-                                  },
-                                  "duration_minutes": {
-                                    "type": "number",
-                                    "description": "Speaker talk time in minutes",
-                                    "example": 1.26
-                                  },
-                                  "words": {
-                                    "type": "integer",
-                                    "description": "Number of words spoken",
-                                    "example": 170
-                                  },
-                                  "turns": {
-                                    "type": "integer",
-                                    "description": "Number of speaking turns",
-                                    "example": 8
-                                  }
-                                }
-                              },
-                              "example": {
-                                "SPEAKER_1": {
-                                  "duration": 75.3,
-                                  "duration_minutes": 1.26,
-                                  "words": 170,
-                                  "turns": 8
-                                },
-                                "SPEAKER_2": {
-                                  "duration": 50.2,
-                                  "duration_minutes": 0.84,
-                                  "words": 115,
-                                  "turns": 6
-                                }
-                              }
-                            }
-                          }
-                        },
-                        "timings": {
-                          "type": "object",
-                          "description": "Detailed timing breakdown for each processing step",
-                          "properties": {
-                            "upload": {
-                              "type": "number",
-                              "description": "File upload time in seconds",
-                              "example": 0.45
-                            },
-                            "validation": {
-                              "type": "number",
-                              "description": "Audio validation time in seconds",
-                              "example": 0.12
-                            },
-                            "preparation": {
-                              "type": "number",
-                              "description": "Audio preparation time in seconds",
-                              "example": 0.18
-                            },
-                            "diarization": {
-                              "type": "number",
-                              "description": "Speaker diarization time in seconds (usually slowest)",
-                              "example": 12.34
-                            },
-                            "transcription": {
-                              "type": "number",
-                              "description": "Speech-to-text time in seconds",
-                              "example": 8.67
-                            },
-                            "summarization": {
-                              "type": "number",
-                              "description": "AI summary generation time in seconds",
-                              "example": 2.15
-                            },
-                            "formatting": {
-                              "type": "number",
-                              "description": "Response formatting time in seconds",
-                              "example": 0.03
-                            },
-                            "processing_total": {
-                              "type": "number",
-                              "description": "Total processing time (excluding upload)",
-                              "example": 23.49
-                            },
-                            "request_total": {
-                              "type": "number",
-                              "description": "Total request time (including upload)",
-                              "example": 23.97
-                            }
-                          }
-                        },
-                        "segments": {
-                          "type": "array",
-                          "description": "Detailed segments (only included if detailed_segments=true)",
-                          "items": {
-                            "type": "object",
-                            "properties": {
-                              "speaker": {
-                                "type": "string",
-                                "example": "SPEAKER_1"
-                              },
-                              "start": {
-                                "type": "number",
-                                "description": "Start time in seconds",
-                                "example": 0.0
-                              },
-                              "end": {
-                                "type": "number",
-                                "description": "End time in seconds",
-                                "example": 5.2
-                              },
-                              "duration": {
-                                "type": "number",
-                                "description": "Segment duration in seconds",
-                                "example": 5.2
-                              },
-                              "text": {
-                                "type": "string",
-                                "example": "Hello everyone"
-                              }
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request - Invalid file or parameters",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "no_file": {
-                    "summary": "No file provided",
-                    "value": {
-                      "success": false,
-                      "message": "No file provided",
-                      "data": null
-                    }
-                  },
-                  "empty_file": {
-                    "summary": "Empty file",
-                    "value": {
-                      "success": false,
-                      "message": "File is empty",
-                      "data": null
-                    }
-                  },
-                  "invalid_format": {
-                    "summary": "Unsupported format",
-                    "value": {
-                      "success": false,
-                      "message": "Unsupported format: .avi. Supported formats: .mp3, .wav, .m4a, .flac, .ogg, .opus, .webm",
-                      "data": null
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "413": {
-            "description": "File too large",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "example": {
-                  "success": false,
-                  "message": "File too large: 520.5MB. Maximum: 500MB",
-                  "data": null
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                },
-                "examples": {
-                  "diarization_error": {
-                    "summary": "Diarization failed",
-                    "value": {
-                      "success": false,
-                      "message": "Speaker diarization failed: Model loading error",
-                      "data": null
-                    }
-                  },
-                  "transcription_error": {
-                    "summary": "Transcription failed",
-                    "value": {
-                      "success": false,
-                      "message": "Transcription failed: Out of memory",
-                      "data": null
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
+        "summary": "Transcribe and wait for the result",
+        "description": "Queued like /jobs; answers 504 with a job id to poll if it takes longer than SYNC_MAX_WAIT_SECONDS. Meant for short audio.",
+        "requestBody": {"content": {"multipart/form-data": {"schema": {"$ref": "#/components/schemas/AudioForm"}}}},
+        "responses": {"200": {"description": "Transcribed", "content": {"application/json": {"schema": {"type": "object", "properties": {"success": {"type": "boolean"}, "data": {"$ref": "#/components/schemas/Result"}}}}}}, "400": {"description": "Invalid request"}, "500": {"description": "Transcription failed"}, "503": {"description": "Too many waiting requests, queue full or model loading"}, "504": {"description": "Still processing"}}
       }
     }
-  },
-  "components": {
-    "schemas": {
-      "Error": {
-        "type": "object",
-        "properties": {
-          "success": {
-            "type": "boolean",
-            "example": false
-          },
-          "message": {
-            "type": "string",
-            "example": "Error message"
-          },
-          "data": {
-            "type": "null",
-            "example": null
-          }
-        }
-      }
-    }
-  },
-  "tags": [
-    {
-      "name": "System",
-      "description": "System & health endpoints"
-    },
-    {
-      "name": "Transcription",
-      "description": "Audio transcription endpoints with speaker diarization, AI summary, and timing info"
-    }
-  ]
+  }
 }

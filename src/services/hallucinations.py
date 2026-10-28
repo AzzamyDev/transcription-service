@@ -1,6 +1,6 @@
 """
 What Whisper writes that nobody said: stock lines over silence, noise or
-music, and runs of the same words. Shared by transcription and analysis.
+music, and runs of the same words. Removed before a transcript is returned.
 """
 import re
 
