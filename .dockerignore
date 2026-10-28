@@ -1,0 +1,12 @@
+# Secrets and local state stay out of the image: compose passes .env at run time.
+.env
+.env.*
+!.env.example
+.git
+.venv
+models
+__pycache__
+.pytest_cache
+tests
+docs
+*.md
