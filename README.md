@@ -28,14 +28,14 @@ docker compose up --build
 
 ### Replicas
 
-One container runs one job at a time. For more throughput run replicas on a port range and spread requests across the ports:
+One container runs one job at a time, so throughput comes from replicas. `docker compose up` starts `ASR_REPLICAS` of them behind an nginx gateway (`gateway`) that is the only published address, `ASR_PORT` (default 7890). Clients use that one URL.
 
 ```bash
 docker compose run --rm asr python -c "from src.services.transcriber import WhisperTranscriber as W; W()"  # download the model once
-ASR_REPLICAS=6 ASR_PORTS=8001-8006 WHISPER_CPU_THREADS=4 docker compose up -d
+ASR_REPLICAS=8 WHISPER_CPU_THREADS=2 docker compose up -d --build
 ```
 
-Keep replicas × `WHISPER_CPU_THREADS` within the machine's cores. Jobs live in memory of the replica that took them: a client polls the replica that answered, and resubmits when it gets 404 (see below).
+Keep replicas × `WHISPER_CPU_THREADS` within the machine's physical cores, with some headroom. The gateway sends new jobs to the replicas in turn, and every poll of `GET /jobs/{job_id}` back to the replica that holds the job (the job id starts with that replica's container id). Jobs live in the memory of that replica: after a restart a client gets 404 and resubmits. `job_key` removes duplicates per replica only, so a resend through the gateway can land on another replica and run twice; the transcript is the same.
 
 ## API
 
@@ -102,6 +102,17 @@ See [.env.example](.env.example). The ones that matter:
 | `API_KEY` | empty | empty = no authentication |
 
 Pick model and beam size by transcribing a few of your own recordings and comparing speed (`timings`, and the realtime factor in the log) against the text.
+
+## Benchmark
+
+`scripts/benchmark.py` sends recordings to every replica at once and reports the fleet's speed, the slowest jobs, and how long your workload would take. Use real recordings of your own (30 seconds to 5 minutes), enough of them to keep every replica busy for a few minutes (`--repeat`).
+
+```bash
+scripts/benchmark.py rekaman/ --urls http://localhost:7890 --replicas 8 --repeat 4 \
+    --need-minutes 20000 --hours 16 --tag turbo-b5-8x2 --out hasil.jsonl --save-transcripts transkrip/
+```
+
+Change `WHISPER_MODEL`, `WHISPER_BEAM_SIZE`, `ASR_REPLICAS` or `WHISPER_CPU_THREADS` in `.env`, run `docker compose up -d`, and run it again under another `--tag`. `scripts/benchmark.py --report hasil.jsonl` then compares the runs, and `--save-transcripts` writes the text of each run for you to read side by side. `--urls` can also list replicas directly (`http://host:8001-8008`) when they publish their own ports. Job times are read at one-second resolution, so very short audio makes the numbers coarse.
 
 ## Tests
 

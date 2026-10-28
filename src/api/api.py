@@ -158,6 +158,7 @@ def health():
         'model': pipeline.transcriber.model_size,
         'compute_type': Config.WHISPER_COMPUTE_TYPE,
         'cpu_threads': Config.WHISPER_CPU_THREADS,
+        'beam_size': Config.BEAM_SIZE,
         'language': Config.LANGUAGE,
         'jobs': jobs.stats(),
     }), 200

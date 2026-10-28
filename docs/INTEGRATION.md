@@ -23,7 +23,7 @@ Tidak ada webhook; klien melakukan polling. Untuk audio pendek ada `POST /transc
 
 | | |
 | --- | --- |
-| Base URL | `http://<host>:<port>`; satu URL per replika (lihat [Banyak replika](#banyak-replika)) |
+| Base URL | `http://<host>:<port>`; satu alamat gateway yang membagi ke semua replika (lihat [Banyak replika](#banyak-replika)) |
 | Autentikasi | Jika service memakai `API_KEY`, kirim header `X-Api-Key: <kunci>` di semua request kecuali `/ping`, `/health`, `/docs`. Salah atau kosong → `401`. |
 | Format respons | JSON `{ "success": bool, "message": string, "data": … }`. Pada error `success` false dan `data` null. |
 | Format audio | mp3, wav, m4a/mp4, ogg, opus, webm, flac (apa pun yang dibaca FFmpeg), mono atau stereo, sample rate bebas. Browser: `audio/webm;codecs=opus` dan `audio/mp4` berfungsi. |
@@ -136,11 +136,13 @@ Rekomendasi sisi klien: simpan hasil transkrip di database Anda begitu `done`; j
 
 ## Banyak replika
 
-Satu replika memproses satu job pada satu waktu; kapasitas diperbesar dengan menambah replika, masing-masing di port sendiri. Klien membagi pekerjaan di antara URL replika.
+Satu replika memproses satu job pada satu waktu; kapasitas diperbesar dengan menambah replika. Di deployment Docker Compose, replika berada di belakang gateway nginx dengan **satu alamat**, dan klien tidak perlu tahu jumlah replikanya:
 
-- **Simpan replika yang menerima job** bersama `job_id`, dan polling ke replika yang sama. Replika lain tidak mengenal job itu (`404`).
-- `job_key` hanya dikenali per replika. Agar retry tidak membuat duplikat di replika lain, pilih replika secara deterministik dari `job_key` (misalnya `hash(job_key) % jumlah_replika`), atau simpan penugasan replika di database sebelum mengirim.
-- Jika replika menjawab `503` (antrian penuh) atau tidak tersambung, coba replika berikutnya.
+- Job baru dibagi bergantian ke semua replika.
+- `GET /jobs/{job_id}` otomatis diteruskan ke replika yang memegang job itu (`job_id` diawali ID replikanya, mis. `9b8f27d956df-…`). Perlakukan `job_id` sebagai string buram: jangan diurai, dan jangan membuatnya sendiri.
+- **`job_key` hanya mencegah duplikat per replika.** Kirim ulang `job_key` yang sama lewat gateway bisa jatuh ke replika lain dan membuat job kedua (audio diproses dua kali, hasilnya sama). Karena itu: setelah menerima `job_id`, polling saja dan jangan kirim ulang; kirim ulang hanya bila respons `POST` hilang atau polling menjawab `404`. Simpan transkrip pertama yang selesai untuk satu `job_key`.
+- Jika memakai replika tanpa gateway (tiap replika di port sendiri), simpan URL replika yang menerima job bersama `job_id` dan polling ke URL itu saja.
+- `503` (antrian penuh di replika itu, atau model masih memuat): coba lagi dengan backoff.
 
 ## Error
 
@@ -160,7 +162,7 @@ Job `failed` membawa `data.error`. Rekaman yang tidak bisa dibaca baru ketahuan 
 
 - Mulai polling 2–3 detik setelah submit; naikkan jarak secara bertahap (misalnya 2 → 5 → 10 detik, maksimum 15). Panjang antrian terlihat dari `position`.
 - Beri batas total (misalnya 2× durasi antrian yang diharapkan) lalu anggap job bermasalah dan kirim ulang.
-- Jika memiliki banyak job, gunakan antrian sendiri di sisi klien (misalnya BullMQ atau Celery) dan batasi jumlah job yang menunggu per replika di bawah `ASR_MAX_PENDING`.
+- Jika memiliki banyak job, gunakan antrian sendiri di sisi klien (misalnya BullMQ atau Celery) dan batasi job yang sedang berjalan (lihat [Banyak replika](#banyak-replika)); antrian tiap replika dibatasi `ASR_MAX_PENDING`.
 
 ## Contoh
 
@@ -258,4 +260,4 @@ POST /jobs   file=<rekaman>, language=id, job_key=voice-{voiceAnswerId}
 GET  /jobs/{job_id}   →  data.result.transcript (teks polos)
 ```
 
-Simpan `job_id` dan URL replikanya, simpan `segments` bila Anda perlu timestamp atau `confidence` untuk koreksi manual, lalu hapus ketergantungan pada service setelah transkrip tersimpan.
+Simpan `job_id`, simpan `segments` bila Anda perlu timestamp atau `confidence` untuk koreksi manual, lalu hapus ketergantungan pada service setelah transkrip tersimpan.

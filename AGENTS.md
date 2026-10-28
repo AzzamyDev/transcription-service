@@ -13,9 +13,11 @@ Client-agnostic HTTP service: audio in, timestamped text out, faster-whisper on 
 ## Runtime model
 
 - **One worker per process.** The model is not thread-safe: all transcription runs on the single `JobQueue` thread, and request threads never touch it. Throughput comes from container replicas (`docker-compose.yml`), not threads or gunicorn workers (`gunicorn.py` stays at 1 worker, no `max_requests` — recycling drops queued jobs).
+- **Replicas sit behind the nginx `gateway`** (`nginx/default.conf.template`). A job id is `<REPLICA_ID>-<hex>`; `REPLICA_ID` defaults to the hostname, which in Docker is the container id that compose DNS resolves, and nginx routes `GET /jobs/<id>` to that container. Keep that prefix and the regex in sync, and treat ids as opaque in the API. Replicas publish no host ports; only the gateway does (`ASR_PORT`).
 - **Model loads after fork** in `gunicorn.py` `post_worker_init`; `/health` is 503 until `api.init()` ran. `run.py` is the dev path.
 - **Jobs live in memory**, 24 h, lost on restart; clients resubmit on 404. Same `job_key` returns the existing job unless it failed. A job past `ASR_JOB_TIMEOUT_MINUTES` makes the process `os._exit(1)` so Docker restarts it.
 - **Audio stays in memory**; a job's payload is dropped once processed.
+- **Gateway.** `nginx/default.conf.template` is the only published address: new jobs go round-robin to `asr`, and `GET /jobs/<id>` goes to the replica named by the id's prefix (`Config.REPLICA_ID`, the container's short id, which the compose network resolves). Keep `job_id` shaped `<replica>-<32 hex>` or the route in the template stops matching. `job_key` is deduplicated per replica only.
 
 ## Gotchas
 

@@ -2,6 +2,8 @@
 Configuration, read from the environment (a `.env` file is loaded too).
 """
 import os
+import re
+import socket
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -30,6 +32,11 @@ class Config:
     MODEL_DIR = os.getenv('MODEL_DIR', str(BASE_DIR / 'models'))
     # Words Whisper should lean towards when unsure, comma separated.
     HOTWORDS = os.getenv('HOTWORDS', '')
+
+    # Prefixes every job id, so a gateway can send a job's polls back to the
+    # replica that holds it. In Docker the hostname is the container's short id,
+    # which the compose network resolves.
+    REPLICA_ID = re.sub(r'[^A-Za-z0-9]', '', os.getenv('REPLICA_ID') or socket.gethostname())[:12] or 'local'
 
     # Empty disables authentication; otherwise requests send X-Api-Key.
     API_KEY = os.getenv('API_KEY', '')

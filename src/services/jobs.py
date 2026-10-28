@@ -12,6 +12,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 
+from src.core.config import Config
+
 
 class QueueFullError(Exception):
     """Too many jobs are waiting"""
@@ -63,7 +65,7 @@ class JobQueue:
                 raise QueueFullError(
                     f'{self._max_pending} jobs are already waiting'
                 )
-            job = Job(id=uuid.uuid4().hex, key=key, payload=payload)
+            job = Job(id=f'{Config.REPLICA_ID}-{uuid.uuid4().hex}', key=key, payload=payload)
             self._jobs[job.id] = job
             if key:
                 self._by_key[key] = job.id

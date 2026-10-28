@@ -81,6 +81,12 @@ def test_tracks_job_answers_at_once_and_finishes(client):
     assert client.pipeline.calls == [([('LEFT', 0.0), ('RIGHT:c1', 8.28)], None)]
 
 
+def test_a_job_id_names_the_replica_that_holds_it(client):
+    job = post_tracks(client, key='sess-id').get_json()['data']
+    assert job['job_id'].startswith(api.Config.REPLICA_ID + '-')
+    assert client.get(f"/jobs/{job['job_id']}").status_code == 200
+
+
 def test_resending_a_key_returns_the_same_job(client):
     first = post_tracks(client, key='sess-2').get_json()['data']
     second = post_tracks(client, key='sess-2').get_json()['data']

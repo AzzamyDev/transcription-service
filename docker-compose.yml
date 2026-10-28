@@ -1,19 +1,19 @@
-# One container is one model and one job at a time. For more throughput run
-# replicas on a port range, e.g. ASR_REPLICAS=6 ASR_PORTS=8001-8006, and
-# spread requests across the ports. Download the model once before scaling
-# (docker compose run --rm asr python -c "from src.services.transcriber import WhisperTranscriber as W; W()")
-# so replicas do not fetch it at the same time.
+# nginx (`gateway`) is the one address clients use; it spreads new jobs over
+# the `asr` replicas and sends each job's polls back to the replica that holds
+# it. One replica runs one job at a time, so ASR_REPLICAS is the throughput.
+# Download the model once before scaling so replicas do not fetch it together:
+#   docker compose run --rm asr python -c "from src.services.transcriber import WhisperTranscriber as W; W()"
 services:
   asr:
     build: .
-    ports:
-      - "${ASR_PORTS:-8000}:8000"
     volumes:
       - ./models:/app/models
     env_file:
       - path: .env
         required: false
     environment:
+      # One source for both, so the app and its math libraries agree.
+      WHISPER_CPU_THREADS: ${WHISPER_CPU_THREADS:-4}
       OMP_NUM_THREADS: ${WHISPER_CPU_THREADS:-4}
     deploy:
       replicas: ${ASR_REPLICAS:-1}
@@ -23,3 +23,17 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  gateway:
+    image: nginx:1.27-alpine
+    ports:
+      - "${ASR_PORT:-7890}:80"
+    volumes:
+      - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+    environment:
+      MAX_AUDIO_SIZE_MB: ${MAX_AUDIO_SIZE_MB:-1000}
+      SYNC_MAX_WAIT_SECONDS: ${SYNC_MAX_WAIT_SECONDS:-1800}
+    depends_on:
+      asr:
+        condition: service_healthy
+    restart: unless-stopped
