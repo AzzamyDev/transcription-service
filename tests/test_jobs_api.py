@@ -1,7 +1,6 @@
 """Job queue and API, with a stand-in pipeline (no GPU or models needed).
 
-Run: pip install pytest flask flask-cors flask-swagger-ui python-dotenv numpy
-     python -m pytest tests
+Run: python -m pytest tests
 """
 import io
 import threading
@@ -17,38 +16,24 @@ class FakePipeline:
         self.release = threading.Event()
         self.release.set()
         self.calls = []
-        self.analyzer = self
-        self.message_analyzer = self
+        self.transcriber = type('T', (), {'model_size': 'fake'})()
 
-    def _result(self, segments):
+    def process(self, tracks, language=None):
+        self.release.wait(5)
+        self.calls.append(([(t['label'], t['offset']) for t in tracks], language))
+        segments = [
+            {'speaker': t['label'], 'start': t['offset'], 'end': t['offset'] + 1,
+             'duration': 1, 'text': 'halo', 'confidence': 0.9}
+            for t in tracks
+        ]
         return {
+            'transcript': 'halo',
             'segments': segments,
-            'summary': 'ringkasan',
-            'summary_status': 'ok',
-            'sentiment': 'NEUTRAL',
-            'flagged_phrases': [],
-            'audio_info': {'duration_seconds': 10, 'duration_minutes': 0.17, 'sample_rate': 16000},
-            'statistics': {'total_duration': 10, 'total_words': 2, 'num_speakers': 1, 'speakers': {}},
+            'language': language,
+            'audio_info': {'duration_seconds': 10, 'sample_rate': 16000},
+            'statistics': {'total_words': 1, 'speech_seconds': 1, 'speakers': {}},
             'timings': {'total': 1.0},
         }
-
-    def process_tracks(self, tracks, include_summary=True):
-        self.release.wait(5)
-        self.calls.append(('tracks', [(t['label'], t['offset'], t['name']) for t in tracks]))
-        return self._result([
-            {'speaker': t['label'], 'start': t['offset'], 'end': t['offset'] + 1, 'duration': 1, 'text': 'halo'}
-            for t in tracks
-        ])
-
-    def analyze(self, segments, hints):
-        self.calls.append(('analysis', len(segments), hints))
-        status = 'unavailable' if hints == ['ollama-down'] else 'ok'
-        return {'status': status, 'summary': 'ringkasan', 'findings': []}
-
-    def process(self, audio, num_speakers=None, min_speakers=None, max_speakers=None, include_summary=True):
-        self.release.wait(5)
-        self.calls.append(('mixed', num_speakers))
-        return self._result([{'speaker': 'SPEAKER_00', 'start': 0, 'end': 1, 'duration': 1, 'text': 'halo'}])
 
 
 @pytest.fixture
@@ -74,9 +59,8 @@ def wait_done(client, job_id, timeout=5):
 def post_tracks(client, key='sess-1', offsets=('0', '8.28')):
     return client.post('/jobs', data={
         'job_key': key,
-        'tracks': [(io.BytesIO(b'a'), 'inmate.mp3'), (io.BytesIO(b'b'), 'family.mp3')],
-        'labels': ['INMATE', 'FAMILY:c1'],
-        'names': ['Warga Binaan', 'Ibu'],
+        'tracks': [(io.BytesIO(b'a'), 'left.mp3'), (io.BytesIO(b'b'), 'right.mp3')],
+        'labels': ['LEFT', 'RIGHT:c1'],
         'offsets': list(offsets),
     }, content_type='multipart/form-data')
 
@@ -92,9 +76,9 @@ def test_tracks_job_answers_at_once_and_finishes(client):
     client.pipeline.release.set()
     done = wait_done(client, job['job_id'])
     assert done['status'] == 'done'
-    assert [s['speaker'] for s in done['result']['segments']] == ['INMATE', 'FAMILY:c1']
+    assert [s['speaker'] for s in done['result']['segments']] == ['LEFT', 'RIGHT:c1']
     assert done['result']['segments'][1]['start'] == 8.28
-    assert client.pipeline.calls == [('tracks', [('INMATE', 0.0, 'Warga Binaan'), ('FAMILY:c1', 8.28, 'Ibu')])]
+    assert client.pipeline.calls == [([('LEFT', 0.0), ('RIGHT:c1', 8.28)], None)]
 
 
 def test_resending_a_key_returns_the_same_job(client):
@@ -115,30 +99,70 @@ def test_rejects_tracks_without_labels_or_offsets(client):
     assert client.post('/jobs', data={}, content_type='multipart/form-data').status_code == 400
 
 
-def test_mixed_file_job_passes_speaker_count(client):
-    res = client.post('/jobs', data={
-        'file': (io.BytesIO(b'x'), 'call.mp3'),
-        'num_speakers': '3',
-    }, content_type='multipart/form-data')
-    done = wait_done(client, res.get_json()['data']['job_id'])
-    assert done['status'] == 'done'
-    assert client.pipeline.calls == [('mixed', 3)]
-
-
 def test_unknown_job_is_404(client):
     assert client.get('/jobs/nope').status_code == 404
 
 
-def test_legacy_transcribe_still_answers_synchronously(client):
-    res = client.post('/transcribe', data={
+def test_one_file_without_a_label_is_transcribed_with_its_language(client):
+    res = client.post('/jobs', data={
+        'file': (io.BytesIO(b'x'), 'answer.webm'),
+        'language': 'en',
+    }, content_type='multipart/form-data')
+    done = wait_done(client, res.get_json()['data']['job_id'])
+    assert done['status'] == 'done'
+    assert client.pipeline.calls == [([(None, 0.0)], 'en')]
+
+
+def test_fields_of_older_clients_are_ignored(client):
+    res = client.post('/jobs', data={
         'file': (io.BytesIO(b'x'), 'call.mp3'),
         'num_speakers': '2',
+        'include_summary': 'false',
+        'names': 'Ibu',
+    }, content_type='multipart/form-data')
+    assert res.status_code == 202
+
+
+@pytest.mark.parametrize('language', ['indonesian', 'I', 'id-ID', '12'])
+def test_a_bad_language_code_is_refused(client, language):
+    res = client.post('/jobs', data={
+        'file': (io.BytesIO(b'x'), 'a.mp3'), 'language': language,
+    }, content_type='multipart/form-data')
+    assert res.status_code == 400
+
+
+def test_transcribe_answers_synchronously_with_segments(client):
+    res = client.post('/transcribe', data={
+        'file': (io.BytesIO(b'x'), 'answer.mp3'),
     }, content_type='multipart/form-data')
     body = res.get_json()
     assert res.status_code == 200
     assert body['success'] is True
-    assert 'segments' not in body['data']
-    assert body['data']['transcript'] == 'SPEAKER_00: halo'
+    assert body['data']['transcript'] == 'halo'
+    assert body['data']['segments'][0]['text'] == 'halo'
+    assert 'request_total' in body['data']['timings']
+
+
+def test_the_api_key_guards_work_but_not_probes(client, monkeypatch):
+    monkeypatch.setattr(api.Config, 'API_KEY', 'secret')
+    form = {'file': (io.BytesIO(b'x'), 'a.mp3')}
+    assert client.post('/jobs', data=form, content_type='multipart/form-data').status_code == 401
+    assert client.get('/jobs/nope').status_code == 401
+    assert client.get('/ping').status_code == 200
+    assert client.get('/health').status_code == 200
+    assert client.get('/api/swagger.json').status_code == 200
+    res = client.post('/jobs', data={'file': (io.BytesIO(b'x'), 'a.mp3')},
+                      content_type='multipart/form-data', headers={'X-Api-Key': 'secret'})
+    assert res.status_code == 202
+
+
+def test_health_reports_loading_until_the_model_is_ready(client, monkeypatch):
+    assert client.get('/health').get_json()['model'] == 'fake'
+    monkeypatch.setattr(api, 'pipeline', None)
+    assert client.get('/health').status_code == 503
+    res = client.post('/jobs', data={'file': (io.BytesIO(b'x'), 'a.mp3')},
+                      content_type='multipart/form-data')
+    assert res.status_code == 503
 
 
 def test_watchdog_reports_a_job_stuck_past_its_limit():
@@ -179,61 +203,3 @@ def test_legacy_transcribe_refuses_when_too_many_callers_wait(client):
         for ok in taken:
             if ok:
                 api.sync_waiters.release()
-
-
-def test_analysis_is_queued_and_polled_like_a_transcription(client):
-    res = client.post('/analyses', json={
-        'job_key': 'analyze-1',
-        'segments': [{'speaker': 'Warga Binaan', 'start': 0, 'end': 2, 'text': 'Halo Bu'}],
-        'hints': ['sabu'],
-    })
-    assert res.status_code == 202
-    data = wait_done(client, res.get_json()['data']['job_id'])
-    assert data['status'] == 'done'
-    assert data['result']['summary'] == 'ringkasan'
-    assert client.pipeline.calls == [('analysis', 1, ['sabu'])]
-
-
-@pytest.mark.parametrize('body', [
-    {},
-    {'segments': 'x'},
-    {'segments': [{'speaker': 'A', 'start': 5, 'end': 1, 'text': 'x'}]},
-    {'segments': [{'speaker': 'A', 'text': 'x'}]},
-    {'segments': [], 'hints': [1]},
-])
-def test_analysis_rejects_a_malformed_body(client, body):
-    assert client.post('/analyses', json=body).status_code == 400
-
-
-def test_an_analysis_the_llm_could_not_make_fails_and_is_not_reused(client):
-    body = {
-        'job_key': 'analyze-2',
-        'segments': [{'speaker': 'Warga Binaan', 'start': 0, 'end': 2, 'text': 'Halo'}],
-        'hints': ['ollama-down'],
-    }
-    first = client.post('/analyses', json=body).get_json()['data']['job_id']
-    data = wait_done(client, first)
-    assert data['status'] == 'failed' and data['error'] == 'unavailable'
-    second = client.post('/analyses', json=body).get_json()['data']['job_id']
-    assert second != first
-
-
-def test_a_message_conversation_is_queued_with_its_new_flags(client):
-    res = client.post('/analyses', json={
-        'mode': 'messages',
-        'job_key': 'messages-1',
-        'hints': [],
-        'messages': [
-            {'id': 'vm-1', 'speaker': 'Warga Binaan', 'at': '11/10 09:00', 'text': 'Halo Bu', 'new': False},
-            {'id': 'rp-2', 'speaker': 'Keluarga', 'at': '11/10 09:05', 'text': 'Halo Nak', 'new': True, 'voice': True},
-        ],
-    })
-    assert res.status_code == 202
-    data = wait_done(client, res.get_json()['data']['job_id'])
-    assert data['status'] == 'done'
-    assert client.pipeline.calls == [('analysis', 2, [])]
-
-
-def test_messages_need_ids(client):
-    res = client.post('/analyses', json={'mode': 'messages', 'messages': [{'text': 'x'}]})
-    assert res.status_code == 400

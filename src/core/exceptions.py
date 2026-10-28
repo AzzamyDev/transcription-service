@@ -1,48 +1,17 @@
-"""
-Custom exceptions for Audio Transcription System
-"""
+"""Exceptions raised by the transcription service"""
 
 
-class AudioTranscriptionError(Exception):
-    """Base exception for audio transcription errors"""
-    pass
+class TranscriptionServiceError(Exception):
+    """Base for errors raised by this service"""
 
 
-class AudioFileError(AudioTranscriptionError):
-    """Exception raised for audio file related errors"""
-    pass
+class AudioFileError(TranscriptionServiceError):
+    """The audio could not be read"""
 
 
-class AudioFormatError(AudioFileError):
-    """Exception raised for unsupported audio formats"""
-    pass
+class ModelLoadError(TranscriptionServiceError):
+    """The speech model could not be loaded"""
 
 
-class AudioSizeError(AudioFileError):
-    """Exception raised when audio file is too large"""
-    pass
-
-
-class ModelLoadError(AudioTranscriptionError):
-    """Exception raised when model loading fails"""
-    pass
-
-
-class TranscriptionError(AudioTranscriptionError):
-    """Exception raised during transcription process"""
-    pass
-
-
-class DiarizationError(AudioTranscriptionError):
-    """Exception raised during speaker diarization"""
-    pass
-
-
-class SummarizationError(AudioTranscriptionError):
-    """Exception raised during AI summarization"""
-    pass
-
-
-class ConfigurationError(AudioTranscriptionError):
-    """Exception raised for configuration errors"""
-    pass
+class TranscriptionError(TranscriptionServiceError):
+    """Transcription failed"""

@@ -1,41 +1,16 @@
-# Core
-torch==2.11.0
-torchaudio==2.11.0
+# Speech-to-text
 faster-whisper==1.1.1
-
-# Pyannote
-pyannote-audio==4.0.4
-pyannote-core==6.0.1
-pyannote-database==6.1.1
-pyannote-metrics==4.0.0
-pyannote-pipeline==4.0.0
-
-# HuggingFace
-huggingface-hub==1.4.1
-
-# Lightning
-lightning==2.6.1
-lightning-utilities==0.15.2
-pytorch-lightning==2.6.1
-
-# Audio processing
-pydub==0.25.1
-soundfile==0.13.1
 numpy>=2.0.0
-scipy==1.17.0
+av>=14.0.0
+# faster-whisper imports requests without declaring it
+requests>=2.32.3
 
 # API
 flask==3.1.2
 werkzeug==3.1.5
 flask-swagger-ui==5.21.0
 flask-cors==6.0.2
-
-# Production WSGI Server
 gunicorn>=21.2.0
-
-# System monitoring
-psutil==7.2.2
 
 # Utilities
 python-dotenv==1.2.1
-requests>=2.32.3

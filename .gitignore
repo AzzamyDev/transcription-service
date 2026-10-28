@@ -60,3 +60,6 @@ temp/
 
 # OS
 Thumbs.db.pytest_cache/
+
+# Whisper weights
+models/

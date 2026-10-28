@@ -1,4 +1,4 @@
-"""Silence filtering on per-speaker tracks (Whisper is stubbed)."""
+"""Silence and invention filtering of a recording (Whisper is stubbed)."""
 import numpy as np
 
 from src.services.transcriber import WhisperTranscriber
@@ -11,7 +11,7 @@ def test_drops_text_whisper_invents_over_silence():
     samples[rate * 10:rate * 15] = 0.2 * np.sin(2 * np.pi * 220 * t)  # speech at 10-15 s
 
     transcriber = WhisperTranscriber.__new__(WhisperTranscriber)
-    transcriber.transcribe_tensor = lambda *args, **kwargs: {'segments': [
+    transcriber._decode = lambda *args, **kwargs: {'segments': [
         {'start': 1.0, 'end': 4.0, 'text': ' Terima kasih telah menonton', 'no_speech_prob': 0.1, 'avg_logprob': -0.2},
         {'start': 10.0, 'end': 14.5, 'text': ' Halo Bu, apa kabar', 'no_speech_prob': 0.05, 'avg_logprob': -0.3},
         {'start': 11.0, 'end': 12.0, 'text': ' hmm', 'no_speech_prob': 0.9, 'avg_logprob': -1.5},
@@ -29,7 +29,7 @@ def test_drops_a_stock_line_whisper_is_unsure_of_and_shortens_loops():
     samples = (0.2 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
 
     transcriber = WhisperTranscriber.__new__(WhisperTranscriber)
-    transcriber.transcribe_tensor = lambda *args, **kwargs: {'segments': [
+    transcriber._decode = lambda *args, **kwargs: {'segments': [
         {'start': 0.0, 'end': 2.0, 'text': ' Terima kasih.', 'no_speech_prob': 0.2, 'avg_logprob': -0.9},
         {'start': 3.0, 'end': 5.0, 'text': ' Terima kasih ya Bu.', 'no_speech_prob': 0.05, 'avg_logprob': -0.1},
         {'start': 5.5, 'end': 5.8, 'text': ' terima kasih', 'no_speech_prob': 0.05, 'avg_logprob': -0.1},
